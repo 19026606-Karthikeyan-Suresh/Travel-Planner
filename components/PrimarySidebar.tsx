@@ -10,6 +10,7 @@ import {
   Compass,
   HardDrive,
   LoaderCircle,
+  LogOut,
   MapPin,
   PanelLeftClose,
   PanelLeftOpen,
@@ -26,6 +27,7 @@ import type { PlaceResult } from '@/lib/geocode';
 import { resetDemoData } from '@/lib/supabaseClient';
 import { MAX_TRIP_DAYS, tripLength } from '@/lib/itinerary';
 import { cn, formatDateRange, formatDateRangeLong, parseISODate, toISODate, todayISO } from '@/lib/utils';
+import { Avatar, AvatarStack, personName } from '@/components/ui/Avatar';
 
 /* -------------------------------------------------------------------------- */
 /*  Sidebar                                                                    */
@@ -140,6 +142,7 @@ function SidebarContent({
   const activeProjectId = useTripStore((s) => s.activeProjectId);
   const setActiveProject = useTripStore((s) => s.setActiveProject);
   const deleteProject = useTripStore((s) => s.deleteProject);
+  const mode = useTripStore((s) => s.mode);
   const [filter, setFilter] = useState('');
 
   const { upcoming, past } = useMemo(() => {
@@ -207,7 +210,8 @@ function SidebarContent({
         {status === 'loading' && <TripListSkeleton />}
         {status === 'ready' && projects.length === 0 && (
           <div className="mx-2 rounded-xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">
-            No trips yet. Start one with <span className="text-zinc-300">New Trip</span>.
+            No trips yet. Start one with <span className="text-zinc-300">New Trip</span>
+            {mode === 'supabase' && ', or ask a friend to share theirs with your email'}.
           </div>
         )}
         {status === 'ready' && filter && upcoming.length + past.length === 0 && (
@@ -217,7 +221,10 @@ function SidebarContent({
         <TripGroup label="Past Trips" projects={past} activeId={activeProjectId} onSelect={select} onDelete={deleteProject} />
       </nav>
 
-      <SyncStatus />
+      <div className="space-y-2 border-t border-zinc-800/80 p-3">
+        <UserBadge />
+        <SyncStatus />
+      </div>
     </div>
   );
 }
@@ -268,6 +275,9 @@ function TripItem({
   const [confirming, setConfirming] = useState(false);
   const today = todayISO();
   const ongoing = project.start_date <= today && project.end_date >= today;
+  const shared = project.members.length > 1;
+  const isOwner = project.currentUserRole === 'owner';
+  const people = project.members.map((m) => m.profile);
 
   useEffect(() => {
     if (!confirming) return;
@@ -281,9 +291,13 @@ function TripItem({
         type="button"
         onClick={onSelect}
         aria-current={active ? 'page' : undefined}
-        title={`${project.destination_name} · ${formatDateRangeLong(project.start_date, project.end_date)}`}
+        title={`${project.destination_name} · ${formatDateRangeLong(project.start_date, project.end_date)}${
+          shared ? `
+Shared with ${people.map(personName).join(', ')}` : ''
+        }`}
         className={cn(
-          'relative flex w-full flex-col gap-1 rounded-lg py-2 pr-9 pl-3 text-left transition-colors',
+          'relative flex w-full flex-col gap-1 rounded-lg py-2 pl-3 text-left transition-colors',
+          isOwner ? 'pr-9' : 'pr-3',
           active ? 'bg-zinc-800/80 text-zinc-50' : 'text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100',
         )}
       >
@@ -294,7 +308,18 @@ function TripItem({
             transition={{ type: 'spring', stiffness: 500, damping: 40 }}
           />
         )}
-        <span className="truncate text-[13.5px] font-medium">{project.title}</span>
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[13.5px] font-medium">{project.title}</span>
+          {shared && (
+            <AvatarStack
+              people={people}
+              max={3}
+              size="xs"
+              ringClassName={active ? 'ring-zinc-800' : 'ring-zinc-950'}
+              className="ml-auto shrink-0"
+            />
+          )}
+        </span>
         <span className="flex min-w-0 items-center gap-1.5">
           <span
             className={cn(
@@ -309,22 +334,29 @@ function TripItem({
               <span className="size-1.5 rounded-full bg-emerald-400" /> Now
             </span>
           )}
+          {shared && !isOwner && (
+            <span className="shrink-0 rounded-md border border-zinc-700/70 px-1 py-px text-[10px] text-zinc-400">
+              {project.currentUserRole === 'viewer' ? 'View only' : 'Shared'}
+            </span>
+          )}
           <span className="truncate text-[11px] text-zinc-500">{project.destination_name}</span>
         </span>
       </button>
-      <button
-        type="button"
-        onClick={() => (confirming ? onDelete() : setConfirming(true))}
-        aria-label={confirming ? `Confirm delete ${project.title}` : `Delete ${project.title}`}
-        className={cn(
-          'absolute top-2 right-1.5 rounded-md p-1 transition-all',
-          confirming
-            ? 'bg-rose-500/15 text-rose-300 opacity-100'
-            : 'text-zinc-500 opacity-0 group-hover:opacity-100 hover:bg-zinc-700/60 hover:text-zinc-200 focus-visible:opacity-100',
-        )}
-      >
-        {confirming ? <Check className="size-3.5" /> : <Trash2 className="size-3.5" />}
-      </button>
+      {isOwner && (
+        <button
+          type="button"
+          onClick={() => (confirming ? onDelete() : setConfirming(true))}
+          aria-label={confirming ? `Confirm delete ${project.title}` : `Delete ${project.title}`}
+          className={cn(
+            'absolute top-2 right-1.5 rounded-md p-1 transition-all',
+            confirming
+              ? 'bg-rose-500/15 text-rose-300 opacity-100'
+              : 'text-zinc-500 opacity-0 group-hover:opacity-100 hover:bg-zinc-700/60 hover:text-zinc-200 focus-visible:opacity-100',
+          )}
+        >
+          {confirming ? <Check className="size-3.5" /> : <Trash2 className="size-3.5" />}
+        </button>
+      )}
     </li>
   );
 }
@@ -348,38 +380,71 @@ function SyncStatus() {
   const saving = pending > 0;
 
   return (
-    <div className="border-t border-zinc-800/80 p-3">
-      <div className="flex items-center gap-2.5 rounded-lg bg-zinc-900/60 px-2.5 py-2">
-        {mode === 'supabase' ? (
-          <Cloud className="size-4 shrink-0 text-emerald-400" />
-        ) : (
-          <HardDrive className="size-4 shrink-0 text-amber-400" />
-        )}
-        <div className="min-w-0 flex-1 leading-tight">
-          <p className="text-xs font-medium text-zinc-200">{mode === 'supabase' ? 'Supabase sync' : 'Demo mode'}</p>
-          <p className="truncate text-[11px] text-zinc-500">
-            {saving ? 'Saving changes…' : mode === 'supabase' ? 'All changes saved' : 'Saved in this browser'}
-          </p>
-        </div>
-        {saving ? (
-          <LoaderCircle className="size-3.5 shrink-0 animate-spin text-zinc-400" />
-        ) : mode === 'demo' ? (
-          <button
-            type="button"
-            onClick={() => {
-              resetDemoData();
-              window.location.reload();
-            }}
-            title="Reset demo data"
-            aria-label="Reset demo data"
-            className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
-          >
-            <RotateCcw className="size-3.5" />
-          </button>
-        ) : (
-          <Check className="size-3.5 shrink-0 text-emerald-400" />
-        )}
+    <div className="flex items-center gap-2.5 rounded-lg bg-zinc-900/60 px-2.5 py-2">
+      {mode === 'supabase' ? (
+        <Cloud className="size-4 shrink-0 text-emerald-400" />
+      ) : (
+        <HardDrive className="size-4 shrink-0 text-amber-400" />
+      )}
+      <div className="min-w-0 flex-1 leading-tight">
+        <p className="text-xs font-medium text-zinc-200">{mode === 'supabase' ? 'Supabase sync' : 'Demo mode'}</p>
+        <p className="truncate text-[11px] text-zinc-500">
+          {saving ? 'Saving changes…' : mode === 'supabase' ? 'All changes saved' : 'Saved in this browser'}
+        </p>
       </div>
+      {saving ? (
+        <LoaderCircle className="size-3.5 shrink-0 animate-spin text-zinc-400" />
+      ) : mode === 'demo' ? (
+        <button
+          type="button"
+          onClick={() => {
+            resetDemoData();
+            window.location.reload();
+          }}
+          title="Reset demo data"
+          aria-label="Reset demo data"
+          className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+        >
+          <RotateCcw className="size-3.5" />
+        </button>
+      ) : (
+        <Check className="size-3.5 shrink-0 text-emerald-400" />
+      )}
+    </div>
+  );
+}
+
+/** Signed-in account with a quiet sign-out; absent in demo mode. */
+function UserBadge() {
+  const user = useTripStore((s) => s.user);
+  const signOut = useTripStore((s) => s.signOut);
+  const [signingOut, setSigningOut] = useState(false);
+  if (!user) return null;
+  const name = personName(user);
+
+  return (
+    <div className="group/user flex items-center gap-2.5 rounded-lg px-1.5 py-1">
+      <Avatar person={user} size="md" className="ring-2 ring-zinc-800" />
+      <div className="min-w-0 flex-1 leading-tight">
+        <p className="truncate text-xs font-medium text-zinc-200">{name}</p>
+        <p className="truncate text-[11px] text-zinc-500" title={user.email}>
+          {user.email}
+        </p>
+      </div>
+      <button
+        type="button"
+        disabled={signingOut}
+        onClick={async () => {
+          setSigningOut(true);
+          await signOut();
+          setSigningOut(false);
+        }}
+        title="Sign out"
+        aria-label="Sign out"
+        className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-rose-300 disabled:opacity-60"
+      >
+        {signingOut ? <LoaderCircle className="size-3.5 animate-spin" /> : <LogOut className="size-3.5" />}
+      </button>
     </div>
   );
 }

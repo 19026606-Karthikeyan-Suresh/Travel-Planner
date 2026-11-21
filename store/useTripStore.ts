@@ -3,17 +3,25 @@
 import { create } from 'zustand';
 import {
   UNASSIGNED,
+  canEditRole,
+  canManageMembers,
   type BucketKey,
+  type CollaboratorRole,
   type DayFilter,
+  type InvitableRole,
+  type InviteResult,
   type NewPinInput,
   type NewProjectInput,
   type PinPlacement,
   type PinUpdate,
   type Project,
+  type ProjectInvitation,
+  type ProjectMember,
   type ProjectPin,
   type ProjectUpdate,
+  type UserProfile,
 } from '@/types/trip';
-import { getTripService, type DataMode } from '@/lib/supabaseClient';
+import { getTripService, onAuthChange, signOutUser, sortMembers, type DataMode } from '@/lib/supabaseClient';
 import { bucketOf, getTripDays } from '@/lib/itinerary';
 import { newId } from '@/lib/utils';
 
@@ -21,7 +29,9 @@ export type WorkspaceTab = 'itinerary' | 'saved' | 'budget';
 /** mobile < 768 ≤ tablet < 1024 ≤ desktop < 1280 ≤ wide */
 export type Viewport = 'mobile' | 'tablet' | 'desktop' | 'wide';
 export type MobilePanel = 'workspace' | 'map';
-type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
+export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
+/** `disabled` = demo mode (no Supabase), where there is nobody to sign in as. */
+export type AuthStatus = 'loading' | 'signed_out' | 'signed_in' | 'disabled';
 
 /** Imperative camera intents consumed by MapCanvas; `id` makes repeats distinct. */
 export type CameraCommand =
@@ -45,12 +55,23 @@ export interface DraftPin {
 export type NewPinDraft = Pick<NewPinInput, 'name' | 'lat' | 'lng'> &
   Partial<Pick<NewPinInput, 'address' | 'category' | 'day_date' | 'notes' | 'cost'>>;
 
+export type InviteOutcome = { ok: true; result: InviteResult } | { ok: false; error: string };
+
 interface TripState {
   mode: DataMode;
+
+  user: UserProfile | null;
+  authStatus: AuthStatus;
+
   projects: Project[];
   projectsStatus: LoadStatus;
   pinsByProject: Record<string, ProjectPin[]>;
   pinsStatus: Record<string, LoadStatus>;
+
+  /** Keyed by project id. */
+  collaborators: Record<string, ProjectMember[]>;
+  invitations: Record<string, ProjectInvitation[]>;
+  collaboratorsStatus: Record<string, LoadStatus>;
 
   activeProjectId: string | null;
   activeTab: WorkspaceTab;
@@ -73,11 +94,16 @@ interface TripState {
   /** Phones show the workspace and the map one at a time. */
   mobilePanel: MobilePanel;
 
-  init: () => Promise<void>;
+  /** Subscribes to Supabase auth (or boots demo mode). Returns the unsubscribe. */
+  startAuth: () => () => void;
+  signOut: () => Promise<void>;
+  loadProjects: () => Promise<void>;
+
   setActiveProject: (id: string | null) => void;
   createProject: (input: NewProjectInput) => Promise<Project | null>;
   updateProject: (id: string, patch: ProjectUpdate) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
+  leaveProject: (id: string) => Promise<boolean>;
 
   addPin: (draft: NewPinDraft) => Promise<ProjectPin | null>;
   updatePin: (id: string, patch: PinUpdate) => Promise<void>;
@@ -85,6 +111,12 @@ interface TripState {
   restorePin: (pin: ProjectPin) => Promise<void>;
   movePinToBucket: (id: string, bucket: BucketKey) => Promise<void>;
   applyArrangement: (arrangement: Record<BucketKey, string[]>) => Promise<void>;
+
+  loadCollaborators: (projectId: string) => Promise<void>;
+  inviteCollaborator: (projectId: string, email: string, role: InvitableRole) => Promise<InviteOutcome>;
+  updateCollaboratorRole: (projectId: string, userId: string, role: InvitableRole) => Promise<void>;
+  removeCollaborator: (projectId: string, userId: string) => Promise<void>;
+  revokeInvitation: (projectId: string, invitationId: string) => Promise<void>;
 
   setActiveTab: (tab: WorkspaceTab) => void;
   setHoveredPin: (id: string | null) => void;
@@ -102,7 +134,10 @@ interface TripState {
 }
 
 export const EMPTY_PINS: ProjectPin[] = [];
+export const EMPTY_MEMBERS: ProjectMember[] = [];
+export const EMPTY_INVITATIONS: ProjectInvitation[] = [];
 const FOCUS_ZOOM = 15;
+const VIEW_ONLY_MESSAGE = 'You have view-only access to this trip.';
 
 /* -------------------------------------------------------------------------- */
 /*  Write queue: optimistic UI applies instantly, persistence runs in order    */
@@ -110,6 +145,8 @@ const FOCUS_ZOOM = 15;
 
 let writeChain: Promise<unknown> = Promise.resolve();
 let cameraSeq = 0;
+/** Users we've already tried `claim_unowned_projects` for this page session. */
+const claimAttempted = new Set<string>();
 
 function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
   const run = writeChain.then(task, task);
@@ -117,7 +154,7 @@ function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') {
     return error.message;
@@ -130,6 +167,25 @@ function nextSortOrder(pins: ProjectPin[], bucket: BucketKey, projectStart: stri
   const inBucket = pins.filter((pin) => bucketOf(pin, days) === bucket);
   return inBucket.reduce((max, pin) => Math.max(max, pin.sort_order + 1), 0);
 }
+
+/** Per-account data; cleared whenever the signed-in user changes. */
+const SIGNED_OUT_DATA = {
+  projects: [],
+  projectsStatus: 'idle',
+  pinsByProject: {},
+  pinsStatus: {},
+  collaborators: {},
+  invitations: {},
+  collaboratorsStatus: {},
+  activeProjectId: null,
+  activeTab: 'itinerary',
+  hoveredPinId: null,
+  selectedPinId: null,
+  dayFilter: 'all',
+  collapsedBuckets: {},
+  draftPin: null,
+  mobilePanel: 'workspace',
+} satisfies Partial<TripState>;
 
 export const useTripStore = create<TripState>()((set, get) => {
   const service = getTripService();
@@ -172,6 +228,46 @@ export const useTripStore = create<TripState>()((set, get) => {
     return projects.find((p) => p.id === activeProjectId);
   }
 
+  function roleFor(projectId: string): CollaboratorRole {
+    return get().projects.find((p) => p.id === projectId)?.currentUserRole ?? 'viewer';
+  }
+
+  /** Client-side mirror of RLS so viewers never see an optimistic change bounce back. */
+  function guardEdit(projectId: string): boolean {
+    if (canEditRole(roleFor(projectId))) return true;
+    get().notify(VIEW_ONLY_MESSAGE, 'info');
+    return false;
+  }
+
+  function guardOwner(projectId: string, message: string): boolean {
+    if (canManageMembers(roleFor(projectId))) return true;
+    get().notify(message, 'info');
+    return false;
+  }
+
+  /** Keeps the sidebar's member dots and the viewer's role in step with the share modal. */
+  function syncMembers(projectId: string, members: ProjectMember[]): void {
+    const userId = get().user?.id;
+    set((s) => ({
+      collaborators: { ...s.collaborators, [projectId]: members },
+      projects: s.projects.map((p) => {
+        if (p.id !== projectId) return p;
+        const own = userId ? members.find((m) => m.user_id === userId) : undefined;
+        return { ...p, members, currentUserRole: own?.role_code ?? p.currentUserRole };
+      }),
+    }));
+  }
+
+  function dropProjectLocally(id: string): void {
+    if (get().activeProjectId === id) get().setActiveProject(null);
+    set((s) => {
+      const { [id]: _pins, ...pinsByProject } = s.pinsByProject;
+      const { [id]: _members, ...collaborators } = s.collaborators;
+      const { [id]: _invites, ...invitations } = s.invitations;
+      return { projects: s.projects.filter((p) => p.id !== id), pinsByProject, collaborators, invitations };
+    });
+  }
+
   async function loadPins(projectId: string): Promise<void> {
     set((s) => ({ pinsStatus: { ...s.pinsStatus, [projectId]: 'loading' } }));
     try {
@@ -187,20 +283,29 @@ export const useTripStore = create<TripState>()((set, get) => {
     }
   }
 
+  /** Called with the restored session and on every auth transition. */
+  function applyUser(user: UserProfile | null): void {
+    const { user: current, authStatus } = get();
+    if (!user) {
+      if (authStatus !== 'signed_out') set({ ...SIGNED_OUT_DATA, user: null, authStatus: 'signed_out' });
+      return;
+    }
+    if (current?.id === user.id && authStatus === 'signed_in') {
+      // Token refresh / metadata update: same account, keep the workspace.
+      set({ user });
+      return;
+    }
+    set({ ...SIGNED_OUT_DATA, user, authStatus: 'signed_in' });
+    void get().loadProjects();
+  }
+
   return {
     mode: service.mode,
-    projects: [],
-    projectsStatus: 'idle',
-    pinsByProject: {},
-    pinsStatus: {},
 
-    activeProjectId: null,
-    activeTab: 'itinerary',
-    hoveredPinId: null,
-    selectedPinId: null,
-    dayFilter: 'all',
-    collapsedBuckets: {},
-    draftPin: null,
+    user: null,
+    authStatus: service.mode === 'demo' ? 'disabled' : 'loading',
+
+    ...SIGNED_OUT_DATA,
     cameraCommand: null,
     mapCenter: null,
 
@@ -209,19 +314,51 @@ export const useTripStore = create<TripState>()((set, get) => {
 
     viewport: null,
     primaryOpen: null,
-    mobilePanel: 'workspace',
 
-    init: async () => {
+    startAuth: () => {
+      if (service.mode === 'demo') {
+        set({ authStatus: 'disabled' });
+        void get().loadProjects();
+        return () => undefined;
+      }
+      return onAuthChange(applyUser);
+    },
+
+    signOut: async () => {
+      try {
+        await signOutUser();
+        // onAuthChange delivers SIGNED_OUT; apply it now too so the UI doesn't wait on the event.
+        applyUser(null);
+      } catch (error) {
+        get().notify(`Couldn't sign out: ${errorMessage(error)}`, 'error');
+      }
+    },
+
+    loadProjects: async () => {
       if (get().projectsStatus !== 'idle') return;
+      const user = get().user;
       set({ projectsStatus: 'loading' });
       try {
-        const projects = await service.listProjects();
+        let projects = await service.listProjects(user);
+        // First sign-in on a fresh schema: adopt the legacy (pre-auth) trips.
+        if (projects.length === 0 && user && service.mode === 'supabase' && !claimAttempted.has(user.id)) {
+          claimAttempted.add(user.id);
+          try {
+            await service.claimUnownedProjects();
+            projects = await service.listProjects(user);
+          } catch (error) {
+            console.warn('[claim_unowned_projects]', errorMessage(error));
+          }
+        }
+        // The account changed while we were loading: that load owns the state now.
+        if (get().user?.id !== user?.id) return;
         set({ projects, projectsStatus: 'ready' });
         // Projects arrive newest-first; open the first so the workspace is populated on first paint.
         const first = projects[0];
         if (first && get().activeProjectId === null) get().setActiveProject(first.id);
         else camera({ kind: 'fit' });
       } catch (error) {
+        if (get().user?.id !== user?.id) return;
         set({ projectsStatus: 'error' });
         get().notify(`Couldn't load trips: ${errorMessage(error)}`, 'error');
       }
@@ -248,7 +385,17 @@ export const useTripStore = create<TripState>()((set, get) => {
     },
 
     createProject: async (input) => {
-      const project: Project = { ...input, id: newId(), user_id: null, created_at: new Date().toISOString() };
+      const user = get().user;
+      const now = new Date().toISOString();
+      const id = newId();
+      const project: Project = {
+        ...input,
+        id,
+        created_by: user?.id ?? null,
+        created_at: now,
+        members: user ? [{ project_id: id, user_id: user.id, role_code: 'owner', joined_at: now, profile: user }] : [],
+        currentUserRole: 'owner',
+      };
       set((s) => ({
         projects: [...s.projects, project],
         pinsByProject: { ...s.pinsByProject, [project.id]: [] },
@@ -256,7 +403,7 @@ export const useTripStore = create<TripState>()((set, get) => {
       }));
       get().setActiveProject(project.id);
       const saved = await persist(
-        () => service.createProject(project),
+        () => service.createProject(project, user),
         () => {
           set((s) => ({
             projects: s.projects.filter((p) => p.id !== project.id),
@@ -271,7 +418,7 @@ export const useTripStore = create<TripState>()((set, get) => {
 
     updateProject: async (id, patch) => {
       const previous = get().projects.find((p) => p.id === id);
-      if (!previous) return;
+      if (!previous || !guardEdit(id)) return;
       const next: Project = { ...previous, ...patch };
       const previousPins = get().pinsByProject[id] ?? EMPTY_PINS;
 
@@ -310,7 +457,7 @@ export const useTripStore = create<TripState>()((set, get) => {
       const { projects, pinsByProject, activeProjectId } = get();
       const index = projects.findIndex((p) => p.id === id);
       const previous = projects[index];
-      if (!previous) return;
+      if (!previous || !guardOwner(id, 'Only the trip owner can delete it. You can leave it from Share instead.')) return;
       const previousPins = pinsByProject[id];
       if (activeProjectId === id) get().setActiveProject(null);
       set((s) => {
@@ -333,14 +480,38 @@ export const useTripStore = create<TripState>()((set, get) => {
       );
     },
 
+    leaveProject: async (id) => {
+      const user = get().user;
+      const project = get().projects.find((p) => p.id === id);
+      if (!user || !project) return false;
+      if (project.currentUserRole === 'owner') {
+        get().notify('Owners can’t leave their own trip.', 'info');
+        return false;
+      }
+      const left = await persist(
+        async () => {
+          await service.removeCollaborator(id, user.id);
+          return true;
+        },
+        () => undefined,
+        "Couldn't leave trip",
+      );
+      if (!left) return false;
+      dropProjectLocally(id);
+      get().notify(`You left “${project.title}”`, 'info');
+      return true;
+    },
+
     addPin: async (draft) => {
       const project = activeProject();
-      if (!project) return null;
+      if (!project || !guardEdit(project.id)) return null;
       const pins = get().pinsByProject[project.id] ?? EMPTY_PINS;
       const dayDate = draft.day_date ?? null;
       const pin: ProjectPin = {
         id: newId(),
         project_id: project.id,
+        place_id: newId(),
+        added_by: get().user?.id ?? null,
         name: draft.name.trim() || 'Untitled place',
         address: draft.address ?? null,
         lat: draft.lat,
@@ -372,10 +543,10 @@ export const useTripStore = create<TripState>()((set, get) => {
 
     updatePin: async (id, patch) => {
       const previous = findPin(id);
-      if (!previous) return;
+      if (!previous || !guardEdit(previous.project_id)) return;
       patchPins(previous.project_id, (list) => list.map((p) => (p.id === id ? { ...p, ...patch } : p)));
       await persist(
-        () => service.updatePin(id, patch),
+        () => service.updatePin(previous, patch),
         () => patchPins(previous.project_id, (list) => list.map((p) => (p.id === id ? previous : p))),
         "Couldn't save place",
       );
@@ -383,7 +554,7 @@ export const useTripStore = create<TripState>()((set, get) => {
 
     deletePin: async (id) => {
       const previous = findPin(id);
-      if (!previous) return;
+      if (!previous || !guardEdit(previous.project_id)) return;
       patchPins(previous.project_id, (list) => list.filter((p) => p.id !== id));
       set((s) => ({
         selectedPinId: s.selectedPinId === id ? null : s.selectedPinId,
@@ -401,10 +572,10 @@ export const useTripStore = create<TripState>()((set, get) => {
     },
 
     restorePin: async (pin) => {
-      if (findPin(pin.id)) return;
+      if (findPin(pin.id) || !guardEdit(pin.project_id)) return;
       patchPins(pin.project_id, (list) => [...list, pin]);
       await persist(
-        () => service.createPin(pin),
+        () => service.restorePin(pin),
         () => patchPins(pin.project_id, (list) => list.filter((p) => p.id !== pin.id)),
         "Couldn't restore place",
       );
@@ -424,7 +595,7 @@ export const useTripStore = create<TripState>()((set, get) => {
 
     applyArrangement: async (arrangement) => {
       const projectId = get().activeProjectId;
-      if (!projectId) return;
+      if (!projectId || !guardEdit(projectId)) return;
       const previousPins = get().pinsByProject[projectId] ?? EMPTY_PINS;
       const byId = new Map(previousPins.map((pin) => [pin.id, pin]));
 
@@ -448,6 +619,84 @@ export const useTripStore = create<TripState>()((set, get) => {
         "Couldn't save new order",
       );
     },
+
+    /* --------------------------------------------------------- sharing --- */
+
+    loadCollaborators: async (projectId) => {
+      set((s) => ({ collaboratorsStatus: { ...s.collaboratorsStatus, [projectId]: 'loading' } }));
+      try {
+        const { members, invitations } = await service.listCollaborators(projectId);
+        set((s) => ({
+          invitations: { ...s.invitations, [projectId]: invitations },
+          collaboratorsStatus: { ...s.collaboratorsStatus, [projectId]: 'ready' },
+        }));
+        // Demo mode has no membership table; keep whatever the project already carries.
+        if (members.length > 0) syncMembers(projectId, members);
+        else
+          set((s) => ({
+            collaborators: {
+              ...s.collaborators,
+              [projectId]: s.projects.find((p) => p.id === projectId)?.members ?? EMPTY_MEMBERS,
+            },
+          }));
+      } catch (error) {
+        set((s) => ({ collaboratorsStatus: { ...s.collaboratorsStatus, [projectId]: 'error' } }));
+        get().notify(`Couldn't load collaborators: ${errorMessage(error)}`, 'error');
+      }
+    },
+
+    inviteCollaborator: async (projectId, email, role) => {
+      if (!canManageMembers(roleFor(projectId))) return { ok: false, error: 'Only the trip owner can invite people.' };
+      set((s) => ({ pendingWrites: s.pendingWrites + 1 }));
+      try {
+        const result = await enqueueWrite(() => service.inviteCollaborator(projectId, email, role));
+        await get().loadCollaborators(projectId);
+        return { ok: true, result };
+      } catch (error) {
+        return { ok: false, error: errorMessage(error) };
+      } finally {
+        set((s) => ({ pendingWrites: Math.max(0, s.pendingWrites - 1) }));
+      }
+    },
+
+    updateCollaboratorRole: async (projectId, userId, role) => {
+      if (!guardOwner(projectId, 'Only the trip owner can change roles.')) return;
+      const previous = get().collaborators[projectId] ?? EMPTY_MEMBERS;
+      const target = previous.find((m) => m.user_id === userId);
+      if (!target || target.role_code === 'owner' || target.role_code === role) return;
+      syncMembers(projectId, sortMembers(previous.map((m) => (m.user_id === userId ? { ...m, role_code: role } : m))));
+      await persist(
+        () => service.updateCollaboratorRole(projectId, userId, role),
+        () => syncMembers(projectId, previous),
+        "Couldn't change role",
+      );
+    },
+
+    removeCollaborator: async (projectId, userId) => {
+      if (!guardOwner(projectId, 'Only the trip owner can remove people.')) return;
+      const previous = get().collaborators[projectId] ?? EMPTY_MEMBERS;
+      const target = previous.find((m) => m.user_id === userId);
+      if (!target || target.role_code === 'owner') return;
+      syncMembers(projectId, previous.filter((m) => m.user_id !== userId));
+      await persist(
+        () => service.removeCollaborator(projectId, userId),
+        () => syncMembers(projectId, previous),
+        "Couldn't remove collaborator",
+      );
+    },
+
+    revokeInvitation: async (projectId, invitationId) => {
+      if (!guardOwner(projectId, 'Only the trip owner can revoke invitations.')) return;
+      const previous = get().invitations[projectId] ?? EMPTY_INVITATIONS;
+      set((s) => ({ invitations: { ...s.invitations, [projectId]: previous.filter((i) => i.id !== invitationId) } }));
+      await persist(
+        () => service.revokeInvitation(invitationId),
+        () => set((s) => ({ invitations: { ...s.invitations, [projectId]: previous } })),
+        "Couldn't revoke invitation",
+      );
+    },
+
+    /* -------------------------------------------------------------- UI --- */
 
     setActiveTab: (tab) => set({ activeTab: tab }),
 
@@ -493,7 +742,13 @@ export const useTripStore = create<TripState>()((set, get) => {
         collapsedBuckets: { ...s.collapsedBuckets, [bucket]: collapsed ?? !s.collapsedBuckets[bucket] },
       })),
 
-    setDraftPin: (draft) => set({ draftPin: draft }),
+    setDraftPin: (draft) => {
+      if (draft) {
+        const id = get().activeProjectId;
+        if (!id || !canEditRole(roleFor(id))) return;
+      }
+      set({ draftPin: draft });
+    },
 
     setMapCenter: (center) => set({ mapCenter: center }),
 
@@ -527,6 +782,15 @@ export const selectActiveProject = (s: TripState): Project | undefined =>
 
 export const selectActivePins = (s: TripState): ProjectPin[] =>
   (s.activeProjectId ? s.pinsByProject[s.activeProjectId] : undefined) ?? EMPTY_PINS;
+
+/** The signed-in user's role on the open trip (`owner` in demo mode). */
+export const selectCurrentUserRole = (s: TripState): CollaboratorRole =>
+  selectActiveProject(s)?.currentUserRole ?? 'viewer';
+
+/** Owners and editors may change the open trip; viewers get the read-only UI. */
+export const selectCanEdit = (s: TripState): boolean => canEditRole(selectCurrentUserRole(s));
+
+export const selectCanManageMembers = (s: TripState): boolean => canManageMembers(selectCurrentUserRole(s));
 
 export const selectPrimaryOpen = (s: TripState): boolean => s.primaryOpen ?? s.viewport === 'wide';
 

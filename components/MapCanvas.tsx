@@ -14,12 +14,12 @@ import Map, {
 } from 'react-map-gl/maplibre';
 import { LngLatBounds } from 'maplibre-gl';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Bookmark, Layers, LoaderCircle, MousePointerClick, Plus, Scan, X } from 'lucide-react';
+import { Bookmark, Eye, Layers, LoaderCircle, MousePointerClick, Plus, Scan, X } from 'lucide-react';
 import { PIN_CATEGORIES, UNASSIGNED, type BucketKey, type DayFilter, type PinCategory, type Project, type ProjectPin, type TripDay } from '@/types/trip';
 import { CATEGORY_LABELS, matchesFilter, UNASSIGNED_COLOR, type PinDisplayMeta } from '@/lib/itinerary';
 import { reverseGeocode } from '@/lib/geocode';
 import { useItinerary } from '@/hooks/useItinerary';
-import { useTripStore, type CameraCommand, type DraftPin } from '@/store/useTripStore';
+import { selectCanEdit, useTripStore, type CameraCommand, type DraftPin } from '@/store/useTripStore';
 import { CategoryIcon } from '@/components/ui/CategoryIcon';
 import { SidebarToggle } from '@/components/PrimarySidebar';
 import { cn } from '@/lib/utils';
@@ -80,6 +80,7 @@ export default function MapCanvas() {
   const setMapCenter = useTripStore((s) => s.setMapCenter);
   const setActiveProject = useTripStore((s) => s.setActiveProject);
   const mobile = useTripStore((s) => s.viewport === 'mobile');
+  const canEdit = useTripStore(selectCanEdit);
 
   const { project, pins, days, meta } = useItinerary(activeProjectId);
 
@@ -229,7 +230,8 @@ export default function MapCanvas() {
   const onMapClick = (e: MapLayerMouseEvent) => {
     if (!project) return;
     selectPin(null);
-    if (draftPin) setDraftPin(null);
+    // Viewers can pan and inspect, but never drop pins.
+    if (draftPin || !canEdit) setDraftPin(null);
     else setDraftPin({ lng: e.lngLat.lng, lat: e.lngLat.lat });
   };
 
@@ -245,7 +247,7 @@ export default function MapCanvas() {
         mapStyle={MAP_STYLE}
         style={{ width: '100%', height: '100%' }}
         attributionControl={{ compact: true }}
-        cursor={project ? 'crosshair' : 'grab'}
+        cursor={project && canEdit ? 'crosshair' : 'grab'}
         onLoad={() => setLoaded(true)}
         onClick={onMapClick}
         onMoveEnd={onMoveEnd}
@@ -268,7 +270,7 @@ export default function MapCanvas() {
         {!project &&
           projects.map((p) => <ProjectMarker key={p.id} project={p} onOpen={() => setActiveProject(p.id)} />)}
 
-        {project && draftPin && <DropPinPopup key={`${draftPin.lat},${draftPin.lng}`} draft={draftPin} days={days} filter={dayFilter} />}
+        {project && canEdit && draftPin && <DropPinPopup key={`${draftPin.lat},${draftPin.lng}`} draft={draftPin} days={days} filter={dayFilter} />}
       </Map>
 
       {/* When a workspace drawer is docked, its header carries the toggle instead. */}
@@ -286,8 +288,17 @@ export default function MapCanvas() {
 
       {project ? (
         <div className="pointer-events-none absolute bottom-4 left-4 z-10 hidden items-center gap-2 rounded-xl sm:flex border border-zinc-700/60 bg-zinc-900/80 px-3 py-2 text-xs text-zinc-400 backdrop-blur-md">
-          <MousePointerClick className="size-3.5 text-indigo-400" />
-          Click the map to drop a pin · drag markers to move them
+          {canEdit ? (
+            <>
+              <MousePointerClick className="size-3.5 text-indigo-400" />
+              Click the map to drop a pin · drag markers to move them
+            </>
+          ) : (
+            <>
+              <Eye className="size-3.5 text-zinc-300" />
+              View only · click a marker to see its details
+            </>
+          )}
         </div>
       ) : (
         <div className="pointer-events-none absolute top-16 left-1/2 z-10 -translate-x-1/2 rounded-xl border whitespace-nowrap sm:top-5 border-zinc-700/60 bg-zinc-900/80 px-4 py-2.5 text-center backdrop-blur-md">
@@ -309,6 +320,7 @@ const PinMarker = memo(function PinMarker({ pin, meta }: { pin: ProjectPin; meta
   const setHoveredPin = useTripStore((s) => s.setHoveredPin);
   const selectPin = useTripStore((s) => s.selectPin);
   const updatePin = useTripStore((s) => s.updatePin);
+  const canEdit = useTripStore(selectCanEdit);
   const lifted = hovered || selected;
 
   return (
@@ -316,7 +328,8 @@ const PinMarker = memo(function PinMarker({ pin, meta }: { pin: ProjectPin; meta
       longitude={pin.lng}
       latitude={pin.lat}
       anchor="center"
-      draggable
+      // Dragging writes lat/lng to `places` (by place_id), so it's editors and owners only.
+      draggable={canEdit}
       style={{ zIndex: lifted ? 30 : meta.number !== null ? 2 : 1 }}
       onClick={(e) => {
         e.originalEvent.stopPropagation();

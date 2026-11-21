@@ -8,21 +8,26 @@ import {
   ChevronDown,
   ChevronRight,
   Crosshair,
+  Eye,
   ListOrdered,
   Map as MapIcon,
   MapPin,
   Pencil,
+  Plus,
+  Users,
   Wallet,
   X,
 } from 'lucide-react';
 import { UNASSIGNED, type BucketKey, type Project, type ProjectPin, type TripDay } from '@/types/trip';
 import { MAX_TRIP_DAYS, sumCost, tripLength, UNASSIGNED_COLOR } from '@/lib/itinerary';
 import { useItinerary } from '@/hooks/useItinerary';
-import { useTripStore, type WorkspaceTab } from '@/store/useTripStore';
+import { selectCanEdit, useTripStore, type WorkspaceTab } from '@/store/useTripStore';
 import { AddPlaceInput } from '@/components/workspace/AddPlaceInput';
 import { BudgetPanel } from '@/components/workspace/BudgetPanel';
 import { BucketDropZone, PinBoard } from '@/components/workspace/PinBoard';
 import { SidebarToggle } from '@/components/PrimarySidebar';
+import { CollaboratorsModal } from '@/components/CollaboratorsModal';
+import { AvatarStack } from '@/components/ui/Avatar';
 import { cn, formatCurrency, formatDateRange, parseISODate } from '@/lib/utils';
 
 const DRAWER_WIDTH = 420;
@@ -153,6 +158,7 @@ function Workspace({ projectId, fluid = false }: { projectId: string; fluid?: bo
 
 function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins: ProjectPin[]; savedCount: number }) {
   const setActiveProject = useTripStore((s) => s.setActiveProject);
+  const canEdit = useTripStore(selectCanEdit);
   const total = sumCost(pins);
 
   return (
@@ -161,10 +167,18 @@ function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins
         <SidebarToggle className="mt-0.5" />
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-1.5 text-xs text-zinc-500">
-            <MapPin className="size-3.5" />
+            <MapPin className="size-3.5 shrink-0" />
             <span className="truncate">{project.destination_name}</span>
+            {!canEdit && (
+              <span
+                className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-full border border-zinc-700/70 bg-zinc-800/70 px-1.5 py-px text-[10.5px] font-medium text-zinc-300"
+                title="You can browse this trip, but only owners and editors can change it"
+              >
+                <Eye className="size-3" /> View only
+              </span>
+            )}
           </p>
-          <EditableTitle project={project} />
+          <EditableTitle project={project} readOnly={!canEdit} />
         </div>
         <button
           type="button"
@@ -177,7 +191,7 @@ function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <DateRangePill project={project} />
+        <DateRangePill project={project} readOnly={!canEdit} />
         <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300 tabular-nums">
           <Wallet className="size-3.5" />
           {formatCurrency(total)}
@@ -186,6 +200,7 @@ function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins
           <MapPin className="size-3.5" />
           {pins.length} place{pins.length === 1 ? '' : 's'}
         </span>
+        <ShareButton project={project} />
       </div>
 
       <WorkspaceTabs savedCount={savedCount} />
@@ -193,10 +208,48 @@ function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins
   );
 }
 
-function EditableTitle({ project }: { project: Project }) {
+/** Avatar stack + `+` that opens the collaborators modal. */
+function ShareButton({ project }: { project: Project }) {
+  const [open, setOpen] = useState(false);
+  const isOwner = project.currentUserRole === 'owner';
+  const people = project.members.map((m) => m.profile);
+  const shared = people.length > 1;
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title={isOwner ? 'Share this trip' : 'See who has access'}
+        className="group ml-auto inline-flex items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 py-1 pr-2.5 pl-1 text-xs font-medium text-indigo-200 transition-all hover:border-indigo-400/50 hover:bg-indigo-500/20 hover:shadow-[0_0_18px_-6px_rgba(99,102,241,0.8)]"
+      >
+        {shared ? (
+          <AvatarStack people={people} max={3} size="xs" ringClassName="ring-zinc-900" className="pl-0.5" />
+        ) : (
+          <span className="grid size-4 place-items-center rounded-full bg-indigo-500/25">
+            <Users className="size-2.5" />
+          </span>
+        )}
+        {isOwner && (
+          <span className="grid size-4 place-items-center rounded-full bg-indigo-500 text-white transition-transform group-hover:scale-110">
+            <Plus className="size-3" strokeWidth={3} />
+          </span>
+        )}
+        Share
+      </button>
+      <CollaboratorsModal project={project} open={open} onClose={() => setOpen(false)} />
+    </>
+  );
+}
+
+function EditableTitle({ project, readOnly = false }: { project: Project; readOnly?: boolean }) {
   const updateProject = useTripStore((s) => s.updateProject);
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(project.title);
+
+  if (readOnly) {
+    return <h2 className="mt-0.5 truncate text-lg font-semibold tracking-tight text-zinc-50">{project.title}</h2>;
+  }
 
   const commit = () => {
     setEditing(false);
@@ -241,7 +294,7 @@ function EditableTitle({ project }: { project: Project }) {
   );
 }
 
-function DateRangePill({ project }: { project: Project }) {
+function DateRangePill({ project, readOnly = false }: { project: Project; readOnly?: boolean }) {
   const updateProject = useTripStore((s) => s.updateProject);
   const [open, setOpen] = useState(false);
   const [start, setStart] = useState(project.start_date);
@@ -265,6 +318,16 @@ function DateRangePill({ project }: { project: Project }) {
   const length = tripLength(start, end);
   const invalid = !parseISODate(start) || !parseISODate(end) || length < 1 || length > MAX_TRIP_DAYS;
   const days = tripLength(project.start_date, project.end_date);
+
+  if (readOnly) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-700/60 bg-zinc-800/60 px-2.5 py-1 text-xs font-medium text-zinc-200 tabular-nums">
+        <CalendarDays className="size-3.5 text-indigo-400" />
+        {formatDateRange(project.start_date, project.end_date)}
+        <span className="text-zinc-500">· {days}d</span>
+      </span>
+    );
+  }
 
   return (
     <div ref={ref} className="relative">
@@ -468,6 +531,7 @@ function DaySection({
   const toggleBucket = useTripStore((s) => s.toggleBucket);
   const dayFilter = useTripStore((s) => s.dayFilter);
   const setDayFilter = useTripStore((s) => s.setDayFilter);
+  const canEdit = useTripStore(selectCanEdit);
   const focused = dayFilter === day.date;
   const cost = sumCost(pins);
 
@@ -520,10 +584,12 @@ function DaySection({
           >
             <div className="space-y-2 px-1 pt-1 pb-3">
               {pins.length === 0 && (
-                <p className="px-2 pb-1 text-xs text-zinc-600">Nothing planned yet — add a place or drag one here.</p>
+                <p className="px-2 pb-1 text-xs text-zinc-600">
+                  {canEdit ? 'Nothing planned yet — add a place or drag one here.' : 'Nothing planned for this day yet.'}
+                </p>
               )}
               {children}
-              <AddPlaceInput bucket={day.date} fallbackCenter={center} accent={day.color} />
+              {canEdit && <AddPlaceInput bucket={day.date} fallbackCenter={center} accent={day.color} />}
             </div>
           </motion.div>
         )}
@@ -539,6 +605,7 @@ function DaySection({
 const SAVED_KEYS: BucketKey[] = [UNASSIGNED];
 
 function SavedPanel({ project, days, buckets, pinsById }: PanelProps) {
+  const canEdit = useTripStore(selectCanEdit);
   const saved = buckets.get(UNASSIGNED) ?? [];
   const center = { lat: project.center_lat, lng: project.center_lng };
 
@@ -546,13 +613,20 @@ function SavedPanel({ project, days, buckets, pinsById }: PanelProps) {
     <div className="space-y-3">
       <div className="flex items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3.5 py-3">
         <Bookmark className="mt-0.5 size-4 shrink-0 text-slate-400" />
-        <p className="text-xs leading-relaxed text-zinc-400">
-          Places you want to fit in somewhere. Use the <CalendarDays className="inline size-3.5 align-[-2px]" /> button on a
-          card to schedule it, or click the map to drop a new pin.
-        </p>
+        {canEdit ? (
+          <p className="text-xs leading-relaxed text-zinc-400">
+            Places you want to fit in somewhere. Use the <CalendarDays className="inline size-3.5 align-[-2px]" /> button on a
+            card to schedule it, or click the map to drop a new pin.
+          </p>
+        ) : (
+          <p className="text-xs leading-relaxed text-zinc-400">
+            Places the group wants to fit in somewhere. You have view-only access, so only owners and editors can schedule
+            them.
+          </p>
+        )}
       </div>
 
-      <AddPlaceInput bucket={UNASSIGNED} fallbackCenter={center} accent={UNASSIGNED_COLOR} />
+      {canEdit && <AddPlaceInput bucket={UNASSIGNED} fallbackCenter={center} accent={UNASSIGNED_COLOR} />}
 
       <PinBoard bucketKeys={SAVED_KEYS} buckets={buckets} pinsById={pinsById} days={days}>
         {(bucket, _ids, list) => (
@@ -565,7 +639,9 @@ function SavedPanel({ project, days, buckets, pinsById }: PanelProps) {
       {saved.length === 0 && (
         <div className="rounded-2xl border border-dashed border-zinc-800 px-6 py-8 text-center">
           <p className="text-sm font-medium text-zinc-300">No saved places</p>
-          <p className="mt-1 text-xs text-zinc-500">Search above or click anywhere on the map to start a wishlist.</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {canEdit ? 'Search above or click anywhere on the map to start a wishlist.' : 'Nothing saved for later yet.'}
+          </p>
         </div>
       )}
     </div>

@@ -140,7 +140,7 @@ export function buildSeedData(today: Date = new Date()): SeedData {
     const start = addDays(today, trip.startOffsetDays);
     projects.push({
       id: trip.id,
-      user_id: null,
+      created_by: null,
       title: trip.title,
       destination_name: trip.destination_name,
       center_lat: trip.center_lat,
@@ -148,6 +148,8 @@ export function buildSeedData(today: Date = new Date()): SeedData {
       start_date: toISODate(start),
       end_date: toISODate(addDays(start, trip.lengthDays - 1)),
       created_at: createdAt,
+      members: [],
+      currentUserRole: 'owner',
     });
 
     const orderByBucket = new Map<number | null, number>();
@@ -155,9 +157,11 @@ export function buildSeedData(today: Date = new Date()): SeedData {
       const order = orderByBucket.get(pin.day) ?? 0;
       orderByBucket.set(pin.day, order + 1);
       pins.push({
-        // Deterministic UUIDs: trip prefix + `b0` + trip suffix + pin index.
+        // Deterministic UUIDs: trip prefix + `b0` (pin) / `c0` (place) + trip suffix + pin index.
         id: `${trip.id.slice(0, 24)}b0${trip.id.slice(-2)}${String(i).padStart(8, '0')}`,
         project_id: trip.id,
+        place_id: `${trip.id.slice(0, 24)}c0${trip.id.slice(-2)}${String(i).padStart(8, '0')}`,
+        added_by: null,
         name: pin.name,
         address: pin.address,
         lat: pin.lat,

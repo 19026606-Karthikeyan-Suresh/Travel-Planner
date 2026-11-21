@@ -6,7 +6,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { Bookmark, CalendarDays, Check, GripVertical, Pencil, Trash2, X } from 'lucide-react';
 import { PIN_CATEGORIES, UNASSIGNED, type PinCategory, type ProjectPin, type TripDay } from '@/types/trip';
 import { CATEGORY_LABELS, type PinDisplayMeta } from '@/lib/itinerary';
-import { useTripStore } from '@/store/useTripStore';
+import { selectCanEdit, useTripStore } from '@/store/useTripStore';
 import { CategoryIcon, CategoryTag } from '@/components/ui/CategoryIcon';
 import { cn, formatCurrency, roundMoney } from '@/lib/utils';
 
@@ -52,6 +52,7 @@ export const PinCard = forwardRef<HTMLDivElement, PinCardProps>(function PinCard
   const selectPin = useTripStore((s) => s.selectPin);
   const deletePin = useTripStore((s) => s.deletePin);
   const movePinToBucket = useTripStore((s) => s.movePinToBucket);
+  const canEdit = useTripStore(selectCanEdit);
   const innerRef = useRef<HTMLDivElement | null>(null);
 
   // Marker clicks select a card that may be off-screen.
@@ -65,7 +66,7 @@ export const PinCard = forwardRef<HTMLDivElement, PinCardProps>(function PinCard
     else if (ref) ref.current = node;
   };
 
-  if (editing) {
+  if (editing && canEdit) {
     return (
       <div ref={setRefs} className={cn('rounded-xl border border-indigo-500/40 bg-zinc-800 p-3.5', className)}>
         <PinEditor pin={pin} onDone={() => onEditChange?.(false)} />
@@ -94,10 +95,12 @@ export const PinCard = forwardRef<HTMLDivElement, PinCardProps>(function PinCard
         className,
       )}
     >
-      <GripVertical
-        className="absolute top-1/2 -left-0.5 size-3.5 -translate-y-1/2 text-zinc-600 opacity-0 transition-opacity group-hover:opacity-100"
-        aria-hidden
-      />
+      {canEdit && (
+        <GripVertical
+          className="absolute top-1/2 -left-0.5 size-3.5 -translate-y-1/2 text-zinc-600 opacity-0 transition-opacity group-hover:opacity-100"
+          aria-hidden
+        />
+      )}
       <PinBadge meta={meta} />
 
       <div className="min-w-0 flex-1">
@@ -114,41 +117,43 @@ export const PinCard = forwardRef<HTMLDivElement, PinCardProps>(function PinCard
 
         <div className="mt-2.5 flex items-center gap-1.5">
           <CategoryTag category={pin.category} />
-          <div
-            className={cn(
-              'ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100',
-              (selected || overlay) && 'opacity-100',
-            )}
-            onClick={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-            onKeyDown={(e) => e.stopPropagation()}
-          >
-            <label
-              title="Move to day"
-              className="relative grid size-7 cursor-pointer place-items-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-700/60 hover:text-zinc-100"
+          {canEdit && (
+            <div
+              className={cn(
+                'ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100',
+                (selected || overlay) && 'opacity-100',
+              )}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
             >
-              <CalendarDays className="size-3.5" />
-              <span className="sr-only">Move to day</span>
-              <select
-                value={bucket}
-                onChange={(e) => void movePinToBucket(pin.id, e.target.value)}
-                className="absolute inset-0 cursor-pointer opacity-0"
+              <label
+                title="Move to day"
+                className="relative grid size-7 cursor-pointer place-items-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-700/60 hover:text-zinc-100"
               >
-                <option value={UNASSIGNED}>Saved Places</option>
-                {days.map((day) => (
-                  <option key={day.date} value={day.date}>
-                    Day {day.index} · {day.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <IconButton label="Edit place" onClick={() => onEditChange?.(true)}>
-              <Pencil className="size-3.5" />
-            </IconButton>
-            <IconButton label="Delete place" danger onClick={() => void deletePin(pin.id)}>
-              <Trash2 className="size-3.5" />
-            </IconButton>
-          </div>
+                <CalendarDays className="size-3.5" />
+                <span className="sr-only">Move to day</span>
+                <select
+                  value={bucket}
+                  onChange={(e) => void movePinToBucket(pin.id, e.target.value)}
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                >
+                  <option value={UNASSIGNED}>Saved Places</option>
+                  {days.map((day) => (
+                    <option key={day.date} value={day.date}>
+                      Day {day.index} · {day.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <IconButton label="Edit place" onClick={() => onEditChange?.(true)}>
+                <Pencil className="size-3.5" />
+              </IconButton>
+              <IconButton label="Delete place" danger onClick={() => void deletePin(pin.id)}>
+                <Trash2 className="size-3.5" />
+              </IconButton>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -286,9 +291,11 @@ function PinEditor({ pin, onDone }: { pin: ProjectPin; onDone: () => void }) {
 
 export function SortablePinCard({ pin, meta, days }: { pin: ProjectPin; meta: PinDisplayMeta; days: TripDay[] }) {
   const [editing, setEditing] = useState(false);
+  const canEdit = useTripStore(selectCanEdit);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: pin.id,
-    disabled: editing,
+    // Viewers get static cards: no drag handles, no keyboard pick-up.
+    disabled: editing || !canEdit,
   });
   const style: CSSProperties = { transform: CSS.Translate.toString(transform), transition };
 
