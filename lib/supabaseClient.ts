@@ -25,6 +25,8 @@ import {
   DEFAULT_FOLDER_COLOR,
 } from '@/types/trip';
 import { buildSeedData, type SeedData } from '@/lib/seed';
+import { formatRoomCode, normalizeRoomCode, randomRoomCode } from '@/lib/roomCode';
+import { newId } from '@/lib/utils';
 
 /* -------------------------------------------------------------------------- */
 /*  Database typing (5NF schema)                                               */
@@ -118,6 +120,8 @@ type ShareLinkRow = Row<{
   id: string;
   project_id: string;
   token: string;
+  /** Added by supabase/migrations/20261122_room_codes.sql. */
+  join_code: string | null;
   role_code: string;
   is_active: boolean;
   created_by: string | null;
@@ -246,6 +250,7 @@ export interface Database {
       revoke_share_link: { Args: { p_project_id: string }; Returns: Json };
       get_share_link_preview: { Args: { p_token: string }; Returns: Json };
       accept_share_link: { Args: { p_token: string }; Returns: Json };
+      resolve_room_code: { Args: { p_code: string }; Returns: string | null };
       assign_project_to_folder: { Args: { p_project_id: string; p_folder_id: string | null }; Returns: Json };
       invite_collaborator: {
         Args: { p_project_id: string; p_email: string; p_role: string };
@@ -486,6 +491,7 @@ function toShareLink(data: Json | ShareLinkRow | null | undefined): ProjectShare
     id: asString(value.id) ?? token,
     project_id: projectId,
     token,
+    join_code: asString(value.join_code) ?? null,
     role_code: toInvitableRole(asString(value.role_code)),
     is_active: value.is_active !== false,
     created_by: asString(value.created_by) ?? null,
@@ -600,6 +606,8 @@ export interface TripService {
   readonly mode: DataMode;
   /** `viewer` is the signed-in user (null in demo mode); it decides `currentUserRole`. */
   listProjects(viewer: UserProfile | null): Promise<Project[]>;
+  /** One trip the viewer can see, or null (not found / no access). */
+  getProject(id: string, viewer: UserProfile | null): Promise<Project | null>;
   createProject(project: Project, viewer: UserProfile | null): Promise<Project>;
   updateProject(id: string, patch: ProjectUpdate): Promise<void>;
   deleteProject(id: string): Promise<void>;
@@ -631,6 +639,8 @@ export interface TripService {
   /** Callable signed out: tells a visitor what they're about to join. */
   getShareLinkPreview(token: string): Promise<ShareLinkPreview>;
   acceptShareLink(token: string): Promise<ShareLinkAcceptResult>;
+  /** Callable signed out: the active link's token for a room code, or null. */
+  resolveRoomCode(code: string): Promise<string | null>;
 
   listFolders(): Promise<TravelFolder[]>;
   createFolder(folder: TravelFolder): Promise<TravelFolder>;
@@ -665,7 +675,7 @@ class SupabaseTripService implements TripService {
     return (data as RawProject[]).map((row) => toProject(row, viewer));
   }
 
-  private async getProject(id: string, viewer: UserProfile | null): Promise<Project | null> {
+  async getProject(id: string, viewer: UserProfile | null): Promise<Project | null> {
     const { data, error } = await this.client.from('projects').select(PROJECT_SELECT).eq('id', id).maybeSingle();
     if (error) throw error;
     return data ? toProject(data as RawProject, viewer) : null;
@@ -881,6 +891,20 @@ class SupabaseTripService implements TripService {
     return toAcceptResult(data);
   }
 
+  async resolveRoomCode(code: string): Promise<string | null> {
+    const normalized = normalizeRoomCode(code);
+    if (!normalized) return null;
+    const { data, error } = await this.client.rpc('resolve_room_code', { p_code: normalized });
+    if (error) {
+      // Migration not applied yet: say so instead of a raw PostgREST error.
+      if (error.code === 'PGRST202' || /resolve_room_code/.test(error.message)) {
+        throw new Error('Room codes aren’t set up on this server yet (run the room-code migration).');
+      }
+      throw error;
+    }
+    return typeof data === 'string' && data ? data : null;
+  }
+
   /* ----------------------------------------------------------- folders --- */
 
   async listFolders(): Promise<TravelFolder[]> {
@@ -948,6 +972,21 @@ class SupabaseTripService implements TripService {
 const DEMO_STORAGE_KEY = 'wayfarer:demo:v2';
 const DEMO_LATENCY_MS = 160;
 const DEMO_SHARING_ERROR = 'Sharing needs a Supabase connection — this is demo mode.';
+const DEMO_LINKS_KEY = 'wayfarer:demo:share-links:v1';
+const DEMO_GUEST_KEY = 'wayfarer:demo:guest-name';
+
+function newDemoLink(projectId: string, role: InvitableRole): ProjectShareLink {
+  return {
+    id: newId(),
+    project_id: projectId,
+    token: newId().replace(/-/g, ''),
+    join_code: randomRoomCode(),
+    role_code: role,
+    is_active: true,
+    created_by: null,
+    created_at: new Date().toISOString(),
+  };
+}
 
 class LocalTripService implements TripService {
   readonly mode = 'demo' as const;
@@ -990,6 +1029,12 @@ class LocalTripService implements TripService {
     return [...this.read().projects]
       .map((p) => ({ ...p, members: p.members ?? [], currentUserRole: 'owner' as const }))
       .sort((a, b) => b.start_date.localeCompare(a.start_date));
+  }
+
+  async getProject(id: string): Promise<Project | null> {
+    await this.tick();
+    const found = this.read().projects.find((p) => p.id === id);
+    return found ? { ...found, members: found.members ?? [], currentUserRole: 'owner' } : null;
   }
 
   async createProject(project: Project): Promise<Project> {
@@ -1083,28 +1128,91 @@ class LocalTripService implements TripService {
     throw new Error(DEMO_SHARING_ERROR);
   }
 
-  async getShareLink(): Promise<ProjectShareLink | null> {
-    return null;
+  /*
+   * Demo share links live in their own localStorage key, so the join → lobby flow can be
+   * clicked through without Supabase. They only work in this browser, and joining always
+   * reports `already_member` because the demo user owns every trip.
+   */
+
+  private readLinks(): Record<string, ProjectShareLink> {
+    try {
+      const raw = window.localStorage.getItem(DEMO_LINKS_KEY);
+      const parsed: unknown = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, ProjectShareLink>) : {};
+    } catch {
+      return {};
+    }
   }
 
-  async enableShareLink(): Promise<ProjectShareLink> {
-    throw new Error(DEMO_SHARING_ERROR);
+  private writeLinks(links: Record<string, ProjectShareLink>): void {
+    try {
+      window.localStorage.setItem(DEMO_LINKS_KEY, JSON.stringify(links));
+    } catch {
+      // Private mode / quota: links just won't survive a reload.
+    }
   }
 
-  async regenerateShareLink(): Promise<ProjectShareLink> {
-    throw new Error(DEMO_SHARING_ERROR);
+  private saveLink(link: ProjectShareLink): ProjectShareLink {
+    this.writeLinks({ ...this.readLinks(), [link.project_id]: link });
+    return link;
   }
 
-  async revokeShareLink(): Promise<void> {
-    throw new Error(DEMO_SHARING_ERROR);
+  private activeLinkWhere(match: (link: ProjectShareLink) => boolean): ProjectShareLink | null {
+    return Object.values(this.readLinks()).find((link) => link.is_active && match(link)) ?? null;
   }
 
-  async getShareLinkPreview(): Promise<ShareLinkPreview> {
-    return { valid: false };
+  async getShareLink(projectId: string): Promise<ProjectShareLink | null> {
+    await this.tick();
+    return this.readLinks()[projectId] ?? null;
   }
 
-  async acceptShareLink(): Promise<ShareLinkAcceptResult> {
-    throw new Error(DEMO_SHARING_ERROR);
+  async enableShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink> {
+    await this.tick();
+    const existing = this.readLinks()[projectId];
+    if (existing) return this.saveLink({ ...existing, role_code: role, is_active: true });
+    return this.saveLink(newDemoLink(projectId, role));
+  }
+
+  async regenerateShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink> {
+    await this.tick();
+    return this.saveLink(newDemoLink(projectId, role));
+  }
+
+  async revokeShareLink(projectId: string): Promise<void> {
+    await this.tick();
+    const existing = this.readLinks()[projectId];
+    if (existing) this.saveLink({ ...existing, is_active: false });
+  }
+
+  async getShareLinkPreview(token: string): Promise<ShareLinkPreview> {
+    await this.tick();
+    const link = this.activeLinkWhere((l) => l.token === token);
+    const project = link ? this.read().projects.find((p) => p.id === link.project_id) : undefined;
+    if (!link || !project) return { valid: false };
+    return {
+      valid: true,
+      project_id: project.id,
+      title: project.title,
+      destination_name: project.destination_name,
+      start_date: project.start_date,
+      end_date: project.end_date,
+      role_code: link.role_code,
+      owner_name: null,
+    };
+  }
+
+  async acceptShareLink(token: string): Promise<ShareLinkAcceptResult> {
+    await this.tick();
+    const link = this.activeLinkWhere((l) => l.token === token);
+    const project = link ? this.read().projects.find((p) => p.id === link.project_id) : undefined;
+    if (!link || !project) throw new Error('This invite is no longer active.');
+    return { status: 'already_member', project_id: project.id, title: project.title, role_code: 'owner' };
+  }
+
+  async resolveRoomCode(code: string): Promise<string | null> {
+    await this.tick();
+    const normalized = normalizeRoomCode(code);
+    return this.activeLinkWhere((l) => l.join_code === normalized)?.token ?? null;
   }
 
   async listFolders(): Promise<TravelFolder[]> {
@@ -1178,6 +1286,7 @@ export function profileFromAuthUser(user: User): UserProfile {
     email: user.email ?? '',
     display_name: metadataString(user, 'display_name') ?? metadataString(user, 'full_name'),
     avatar_url: metadataString(user, 'avatar_url'),
+    is_anonymous: user.is_anonymous === true,
   };
 }
 
@@ -1225,6 +1334,59 @@ export async function signUpWithEmail(
   });
   if (error) throw error;
   return { needsConfirmation: data.session === null };
+}
+
+export const GUEST_NAME_MAX = 40;
+
+function demoGuestProfile(name: string): UserProfile {
+  return { id: 'demo-guest', email: '', display_name: name, avatar_url: null, is_anonymous: true };
+}
+
+/** Demo mode only: the display name entered on the guest join screen in this browser. */
+export function getDemoGuest(): UserProfile | null {
+  try {
+    const name = window.localStorage.getItem(DEMO_GUEST_KEY)?.trim();
+    return name ? demoGuestProfile(name) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Guest join: an anonymous Supabase user whose only identity is a display name (needs
+ * "Allow anonymous sign-ins" in the Supabase Auth settings). In demo mode the name is just
+ * remembered in this browser.
+ */
+export async function signInAsGuest(displayName: string): Promise<UserProfile> {
+  const name = displayName.trim().slice(0, GUEST_NAME_MAX);
+  if (!name) throw new Error('Enter a display name');
+
+  const client = getSupabaseClient();
+  if (!client) {
+    try {
+      window.localStorage.setItem(DEMO_GUEST_KEY, name);
+    } catch {
+      // Storage blocked: the name still applies for this visit.
+    }
+    return demoGuestProfile(name);
+  }
+
+  const { data, error } = await client.auth.signInAnonymously({
+    options: { data: { display_name: name, full_name: name } },
+  });
+  if (error) {
+    if (/anonymous sign-ins are disabled/i.test(error.message)) {
+      throw new Error('Guest joining isn’t switched on for this server yet. Sign in with an account instead.');
+    }
+    throw error;
+  }
+  if (!data.user) throw new Error('Guest sign-in returned no user');
+
+  // The new-user trigger usually copies display_name from the metadata; make sure the profile has it.
+  const { error: profileError } = await client.from('profiles').update({ display_name: name }).eq('id', data.user.id);
+  if (profileError) console.warn('[guest profile]', profileError.message);
+
+  return profileFromAuthUser(data.user);
 }
 
 export async function signOutUser(): Promise<void> {
@@ -1302,9 +1464,19 @@ export function acceptShareLink(token: string): Promise<ShareLinkAcceptResult> {
   return getTripService().acceptShareLink(token);
 }
 
-export function shareLinkUrl(token: string): string {
+export function resolveRoomCode(code: string): Promise<string | null> {
+  return getTripService().resolveRoomCode(code);
+}
+
+export function getProjectById(id: string, viewer: UserProfile | null): Promise<Project | null> {
+  return getTripService().getProject(id, viewer);
+}
+
+/** `/join/K7QM-2XPA` once the link has a room code; the long token for links made before codes. */
+export function shareLinkUrl(link: Pick<ProjectShareLink, 'token' | 'join_code'>): string {
   const origin = typeof window === 'undefined' ? '' : window.location.origin;
-  return `${origin}/join/${encodeURIComponent(token)}`;
+  const slug = link.join_code ? formatRoomCode(link.join_code) : link.token;
+  return `${origin}/join/${encodeURIComponent(slug)}`;
 }
 
 /* ------------------------------------------------------------- folders --- */

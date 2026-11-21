@@ -41,6 +41,8 @@ export interface UserProfile {
   email: string;
   display_name: string | null;
   avatar_url: string | null;
+  /** Guest who joined with a room code and only a display name (Supabase anonymous sign-in). */
+  is_anonymous?: boolean;
 }
 
 /** Row in `public.project_members`, hydrated with the member's profile. */
@@ -80,6 +82,8 @@ export interface ProjectShareLink {
   id: string;
   project_id: string;
   token: string;
+  /** Short typeable code (`K7QM2XPA`, shown as `K7QM-2XPA`); null until the room-code migration runs. */
+  join_code: string | null;
   role_code: InvitableRole;
   is_active: boolean;
   created_by: string | null;

@@ -16,6 +16,19 @@ Open http://localhost:3000.
 
 The basemap is CartoDB Dark Matter and place search uses Photon (OpenStreetMap). Neither needs an API key.
 
+## Room codes and guest join
+
+Each trip's invite link carries a short room code (`/join/K7QM-2XPA`). Owners see the code, the link and a QR code in the Share modal. A new person can open the link, scan the QR with a phone camera, or type the code at `/join`. A valid code asks only for a display name (no account), then opens a lobby that shows the trip and who's on it. **Enter trip** goes to the workspace.
+
+One-time Supabase setup:
+
+1. Run [`supabase/migrations/20261122_room_codes.sql`](supabase/migrations/20261122_room_codes.sql) in the SQL editor. It adds `project_share_links.join_code`, a trigger that issues a new code whenever a link's token is reset, the signed-out `resolve_room_code(code)` lookup, a nullable `profiles.email` for guests, and adds `project_members` to the Realtime publication for the live lobby.
+2. Turn on **Authentication → Sign In / Providers → Allow anonymous sign-ins**. Guests are Supabase anonymous users, so their access lives in that browser. Signing out loses it, and the sidebar asks for a second click before a guest signs out.
+
+If guest sign-in fails with "Database error saving new user", the new-user trigger that creates `profiles` rows needs to accept a null email.
+
+In demo mode, room codes are stored in `localStorage`, so the whole code → name → lobby flow can be tried in one browser.
+
 ## Layout
 
 | Path | What it does |
@@ -30,6 +43,10 @@ The basemap is CartoDB Dark Matter and place search uses Photon (OpenStreetMap).
 | `components/workspace/*` | Pin cards, the drag-and-drop board, inline place search, budget breakdown |
 | `components/MapCanvas.tsx` | Numbered markers, dashed day routes, day filter, click-to-drop popup, ResizeObserver and auto-framing |
 | `app/page.tsx` | Three-pane viewport |
+| `app/join/page.tsx`, `app/join/[token]/page.tsx` | Room-code entry, and the invite landing page (guest display name or account sign-in) |
+| `app/lobby/[projectId]/page.tsx`, `components/join/*` | Lobby with live presence, and the shared join-screen UI |
+| `lib/roomCode.ts` | Room-code normalising and formatting (`k7qm 2xpa` → `K7QM-2XPA`) |
+| `supabase/migrations/` | SQL to run on the Supabase project |
 
 ## Behaviour notes
 

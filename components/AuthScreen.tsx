@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, type FormEvent, type ReactNode } from 'react';
+import Link from 'next/link';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowRight,
@@ -8,6 +9,7 @@ import {
   Compass,
   Eye,
   EyeOff,
+  KeyRound,
   LoaderCircle,
   Lock,
   Mail,
@@ -41,7 +43,14 @@ function friendlyAuthError(message: string): string {
  * Email + password gate shown while there is no Supabase session. Success needs no
  * callback: the store's `onAuthStateChange` listener swaps in the workspace.
  */
-export function AuthScreen({ invitePreview }: { invitePreview?: ShareLinkPreview | null } = {}) {
+export function AuthScreen({
+  invitePreview,
+  onJoinAsGuest,
+}: {
+  invitePreview?: ShareLinkPreview | null;
+  /** On an invite: go back to joining with just a display name. */
+  onJoinAsGuest?: () => void;
+} = {}) {
   const [mode, setMode] = useState<Mode>('sign_in');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -288,6 +297,22 @@ export function AuthScreen({ invitePreview }: { invitePreview?: ShareLinkPreview
             </p>
           </div>
         </div>
+
+        <div className="mt-4 text-center text-xs text-zinc-500">
+          {onJoinAsGuest ? (
+            <button type="button" onClick={onJoinAsGuest} className="inline-flex items-center gap-1.5 font-medium text-zinc-300 hover:text-white">
+              <User className="size-3.5" />
+              Join as a guest with just a name instead
+            </button>
+          ) : (
+            !invitePreview && (
+              <Link href="/join" className="inline-flex items-center gap-1.5 font-medium text-zinc-300 hover:text-white">
+                <KeyRound className="size-3.5" />
+                Have a room code? Join a trip
+              </Link>
+            )
+          )}
+        </div>
       </motion.div>
     </div>
   );
@@ -382,7 +407,7 @@ const STOPS = [
 ];
 
 /** Static stand-in for the basemap so the sign-in screen feels like the app it opens. */
-function MapBackdrop() {
+export function MapBackdrop() {
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden>
       <svg className="absolute inset-0 size-full" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice">

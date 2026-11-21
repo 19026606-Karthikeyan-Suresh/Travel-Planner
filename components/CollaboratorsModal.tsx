@@ -41,7 +41,9 @@ import {
   revokeShareLink,
   shareLinkUrl,
 } from '@/lib/supabaseClient';
+import { QRCodeSVG } from 'qrcode.react';
 import { Avatar, personName } from '@/components/ui/Avatar';
+import { formatRoomCode } from '@/lib/roomCode';
 import { cn } from '@/lib/utils';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -137,13 +139,17 @@ function SharePanel({ project, onClose }: { project: Project; onClose: () => voi
 
       <div className="scrollbar-thin flex-1 overflow-y-auto px-5 py-4">
         {mode === 'demo' ? (
-          <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3.5 py-3 text-[13px] text-amber-100">
-            <HardDrive className="mt-0.5 size-4 shrink-0 text-amber-400" />
-            <p>
-              Sharing needs a Supabase connection. Add your project URL and anon key to <code className="text-amber-200">.env.local</code>,
-              sign in, and you can invite people by email.
-            </p>
-          </div>
+          <>
+            <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3.5 py-3 text-[13px] text-amber-100">
+              <HardDrive className="mt-0.5 size-4 shrink-0 text-amber-400" />
+              <p>
+                Sharing needs a Supabase connection. Add your project URL and anon key to{' '}
+                <code className="text-amber-200">.env.local</code>, sign in, and you can invite people by email. Until then the
+                room code below only works in this browser, so you can try the join flow.
+              </p>
+            </div>
+            <ShareLinkCard projectId={project.id} />
+          </>
         ) : isOwner ? (
           <>
             <InviteBar projectId={project.id} />
@@ -370,7 +376,7 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
   const [busy, setBusy] = useState<LinkAction | null>(null);
   const [armed, setArmed] = useState<'reset' | 'disable' | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'link' | 'code' | null>(null);
   const urlRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -394,7 +400,7 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 2000);
+    const timer = window.setTimeout(() => setCopied(null), 2000);
     return () => window.clearTimeout(timer);
   }, [copied]);
 
@@ -405,7 +411,8 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
   }, [armed]);
 
   const active = link?.is_active ? link : null;
-  const url = active ? shareLinkUrl(active.token) : '';
+  const url = active ? shareLinkUrl(active) : '';
+  const code = active?.join_code ? formatRoomCode(active.join_code) : null;
 
   const run = async (action: LinkAction, task: () => Promise<ProjectShareLink | null>) => {
     setBusy(action);
@@ -423,15 +430,18 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
     }
   };
 
-  const copy = async () => {
+  const copy = async (what: 'link' | 'code') => {
+    const text = what === 'code' && code ? code : url;
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(text);
     } catch {
       // Clipboard API blocked (insecure origin / permissions): fall back to a selection copy.
-      urlRef.current?.select();
-      document.execCommand('copy');
+      if (what === 'link') {
+        urlRef.current?.select();
+        document.execCommand('copy');
+      }
     }
-    setCopied(true);
+    setCopied(what);
   };
 
   return (
@@ -455,7 +465,9 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
             )}
           </p>
           <p className="text-xs text-zinc-500">
-            {active ? 'Anyone with this link can join the trip.' : 'Share one link in a group chat instead of inviting each email.'}
+            {active
+              ? 'Anyone with the code, link or QR can join with just a display name.'
+              : 'Share one code or link in a group chat instead of inviting each email.'}
           </p>
         </div>
         {active && (
@@ -496,6 +508,45 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
         <div className="mt-3 h-9 animate-pulse rounded-lg bg-zinc-800/60" aria-hidden />
       ) : active ? (
         <div className="mt-3 space-y-2.5">
+          <div className="flex items-stretch gap-3 rounded-lg border border-zinc-800 bg-zinc-900/80 p-2.5">
+            <div className="shrink-0 rounded-md bg-white p-1.5" title="Scan with a phone camera to join">
+              <QRCodeSVG value={url} size={96} level="M" marginSize={0} title={`QR code for ${url}`} />
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col justify-between gap-2">
+              {code ? (
+                <div>
+                  <p className="text-[10.5px] font-medium tracking-wider text-zinc-500 uppercase">Room code</p>
+                  <p className="font-mono text-[22px] leading-tight font-semibold tracking-[0.14em] text-zinc-50" aria-label={`Room code ${code}`}>
+                    {code}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs leading-relaxed text-zinc-500">
+                  Short room codes appear here once the room-code migration has run on the server.
+                </p>
+              )}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                {code && (
+                  <button
+                    type="button"
+                    onClick={() => void copy('code')}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors',
+                      copied === 'code'
+                        ? 'bg-emerald-500/15 text-emerald-300'
+                        : 'border border-zinc-700 bg-zinc-800/80 text-zinc-200 hover:bg-zinc-700/80',
+                    )}
+                  >
+                    {copied === 'code' ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                    {copied === 'code' ? 'Copied!' : 'Copy code'}
+                  </button>
+                )}
+                <span className="text-[11px] text-zinc-500">
+                  Scan, or enter at <span className="text-zinc-400">{joinPageHost()}/join</span>
+                </span>
+              </div>
+            </div>
+          </div>
           <div className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/80 py-1 pr-1 pl-3 focus-within:border-indigo-500/50">
             <input
               ref={urlRef}
@@ -507,14 +558,14 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
             />
             <button
               type="button"
-              onClick={() => void copy()}
+              onClick={() => void copy('link')}
               className={cn(
                 'flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors',
-                copied ? 'bg-emerald-500/15 text-emerald-300' : 'bg-indigo-600 text-white hover:bg-indigo-500',
+                copied === 'link' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-indigo-600 text-white hover:bg-indigo-500',
               )}
             >
-              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-              {copied ? 'Copied!' : 'Copy link'}
+              {copied === 'link' ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              {copied === 'link' ? 'Copied!' : 'Copy link'}
             </button>
           </div>
           <label className="flex items-center gap-2 text-xs text-zinc-400">
@@ -571,6 +622,11 @@ function ShareLinkCard({ projectId }: { projectId: string }) {
       )}
     </section>
   );
+}
+
+/** `wayfarer.app` / `localhost:3000`: where people type the code. */
+function joinPageHost(): string {
+  return typeof window === 'undefined' ? '' : window.location.host;
 }
 
 function LinkIconButton({
