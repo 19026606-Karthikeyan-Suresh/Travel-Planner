@@ -2,10 +2,23 @@
 
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ArrowRight, CircleAlert, Compass, Eye, EyeOff, LoaderCircle, Lock, Mail, MailCheck, User } from 'lucide-react';
+import {
+  ArrowRight,
+  CircleAlert,
+  Compass,
+  Eye,
+  EyeOff,
+  LoaderCircle,
+  Lock,
+  Mail,
+  MailCheck,
+  PlaneTakeoff,
+  User,
+} from 'lucide-react';
+import { ROLE_LABELS, type ShareLinkPreview } from '@/types/trip';
 import { signInWithEmail, signUpWithEmail } from '@/lib/supabaseClient';
 import { errorMessage } from '@/store/useTripStore';
-import { cn } from '@/lib/utils';
+import { cn, formatDateRangeLong } from '@/lib/utils';
 
 type Mode = 'sign_in' | 'sign_up';
 
@@ -28,7 +41,7 @@ function friendlyAuthError(message: string): string {
  * Email + password gate shown while there is no Supabase session. Success needs no
  * callback: the store's `onAuthStateChange` listener swaps in the workspace.
  */
-export function AuthScreen() {
+export function AuthScreen({ invitePreview }: { invitePreview?: ShareLinkPreview | null } = {}) {
   const [mode, setMode] = useState<Mode>('sign_in');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -95,185 +108,223 @@ export function AuthScreen() {
         transition={{ type: 'spring', stiffness: 260, damping: 28, delay: 0.05 }}
         className="relative w-full max-w-[400px]"
       >
-        {/* Soft indigo glow behind the glass. */}
-        <div className="pointer-events-none absolute -inset-px rounded-[22px] bg-gradient-to-b from-indigo-500/25 via-white/[0.04] to-transparent" aria-hidden />
-        <div className="relative rounded-[21px] border border-white/[0.08] bg-zinc-900/55 p-6 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.85)] backdrop-blur-2xl sm:p-7">
-          <div className="flex flex-col items-center text-center">
-            <div className="grid size-11 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 shadow-[0_0_32px_-6px_rgba(99,102,241,0.9)]">
-              <Compass className="size-6 text-white" strokeWidth={2.25} />
+        {invitePreview?.valid && <InviteBanner preview={invitePreview} />}
+        <div className="relative">
+          {/* Soft indigo glow behind the glass. */}
+          <div className="pointer-events-none absolute -inset-px rounded-[22px] bg-gradient-to-b from-indigo-500/25 via-white/[0.04] to-transparent" aria-hidden />
+          <div className="relative rounded-[21px] border border-white/[0.08] bg-zinc-900/55 p-6 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.85)] backdrop-blur-2xl sm:p-7">
+            <div className="flex flex-col items-center text-center">
+              <div className="grid size-11 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 shadow-[0_0_32px_-6px_rgba(99,102,241,0.9)]">
+                <Compass className="size-6 text-white" strokeWidth={2.25} />
+              </div>
+              <h1 className="mt-4 text-xl font-semibold tracking-tight">
+                {signingUp ? 'Start planning with Wayfarer' : 'Welcome back'}
+              </h1>
+              <p className="mt-1 text-[13px] text-zinc-400">
+                {signingUp ? 'Create an account to build and share trips.' : 'Sign in to pick up where your trips left off.'}
+              </p>
             </div>
-            <h1 className="mt-4 text-xl font-semibold tracking-tight">
-              {signingUp ? 'Start planning with Wayfarer' : 'Welcome back'}
-            </h1>
-            <p className="mt-1 text-[13px] text-zinc-400">
-              {signingUp ? 'Create an account to build and share trips.' : 'Sign in to pick up where your trips left off.'}
-            </p>
-          </div>
 
-          <div role="tablist" aria-label="Account" className="mt-6 grid grid-cols-2 rounded-xl border border-white/[0.06] bg-zinc-950/60 p-1">
-            {(
-              [
-                ['sign_in', 'Sign in'],
-                ['sign_up', 'Create account'],
-              ] as const
-            ).map(([id, label]) => {
-              const active = id === mode;
-              return (
+            <div role="tablist" aria-label="Account" className="mt-6 grid grid-cols-2 rounded-xl border border-white/[0.06] bg-zinc-950/60 p-1">
+              {(
+                [
+                  ['sign_in', 'Sign in'],
+                  ['sign_up', 'Create account'],
+                ] as const
+              ).map(([id, label]) => {
+                const active = id === mode;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => switchMode(id)}
+                    className={cn(
+                      'relative rounded-lg py-1.5 text-[13px] font-medium transition-colors',
+                      active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-300',
+                    )}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId="auth-mode"
+                        className="absolute inset-0 rounded-lg border border-zinc-700/60 bg-zinc-800 shadow-sm"
+                        transition={{ type: 'spring', stiffness: 520, damping: 40 }}
+                      />
+                    )}
+                    <span className="relative">{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <form onSubmit={submit} noValidate className="mt-5 space-y-3.5">
+              <AnimatePresence initial={false}>
+                {confirmationSentTo && (
+                  <motion.div
+                    key="confirm"
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-200">
+                      <MailCheck className="mt-0.5 size-4 shrink-0 text-emerald-400" />
+                      <p>
+                        Check <span className="font-medium text-emerald-100">{confirmationSentTo}</span> for a confirmation link, then
+                        sign in here.
+                      </p>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <AnimatePresence initial={false}>
+                {signingUp && (
+                  <motion.div
+                    key="name"
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.18 }}
+                    className="overflow-hidden"
+                  >
+                    <AuthField label="Name" hint="Optional · shown to collaborators" icon={<User className="size-4" />}>
+                      <input
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        autoComplete="name"
+                        placeholder="Alex Rivera"
+                        maxLength={60}
+                        className={inputClass}
+                      />
+                    </AuthField>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <AuthField label="Email" icon={<Mail className="size-4" />} error={attempted ? fieldErrors.email : null}>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                  autoFocus
+                  placeholder="you@example.com"
+                  aria-invalid={attempted && Boolean(fieldErrors.email)}
+                  className={inputClass}
+                />
+              </AuthField>
+
+              <AuthField label="Password" icon={<Lock className="size-4" />} error={attempted ? fieldErrors.password : null}>
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete={signingUp ? 'new-password' : 'current-password'}
+                  placeholder={signingUp ? `At least ${MIN_PASSWORD} characters` : '••••••••'}
+                  aria-invalid={attempted && Boolean(fieldErrors.password)}
+                  className={cn(inputClass, 'pr-10')}
+                />
                 <button
-                  key={id}
                   type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => switchMode(id)}
-                  className={cn(
-                    'relative rounded-lg py-1.5 text-[13px] font-medium transition-colors',
-                    active ? 'text-zinc-50' : 'text-zinc-500 hover:text-zinc-300',
-                  )}
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
                 >
-                  {active && (
-                    <motion.span
-                      layoutId="auth-mode"
-                      className="absolute inset-0 rounded-lg border border-zinc-700/60 bg-zinc-800 shadow-sm"
-                      transition={{ type: 'spring', stiffness: 520, damping: 40 }}
-                    />
-                  )}
-                  <span className="relative">{label}</span>
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
-              );
-            })}
-          </div>
+              </AuthField>
 
-          <form onSubmit={submit} noValidate className="mt-5 space-y-3.5">
-            <AnimatePresence initial={false}>
-              {confirmationSentTo && (
-                <motion.div
-                  key="confirm"
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
-                >
-                  <div className="flex items-start gap-2.5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-200">
-                    <MailCheck className="mt-0.5 size-4 shrink-0 text-emerald-400" />
-                    <p>
-                      Check <span className="font-medium text-emerald-100">{confirmationSentTo}</span> for a confirmation link, then
-                      sign in here.
-                    </p>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+              <AnimatePresence initial={false}>
+                {error && (
+                  <motion.div
+                    key="error"
+                    role="alert"
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    transition={{ duration: 0.15 }}
+                    className="flex items-start gap-2.5 rounded-xl border border-rose-500/25 bg-rose-500/10 px-3 py-2.5 text-[13px] text-rose-200"
+                  >
+                    <CircleAlert className="mt-0.5 size-4 shrink-0 text-rose-400" />
+                    <p>{error}</p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-            <AnimatePresence initial={false}>
-              {signingUp && (
-                <motion.div
-                  key="name"
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.18 }}
-                  className="overflow-hidden"
-                >
-                  <AuthField label="Name" hint="Optional · shown to collaborators" icon={<User className="size-4" />}>
-                    <input
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      autoComplete="name"
-                      placeholder="Alex Rivera"
-                      maxLength={60}
-                      className={inputClass}
-                    />
-                  </AuthField>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <AuthField label="Email" icon={<Mail className="size-4" />} error={attempted ? fieldErrors.email : null}>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                autoComplete="email"
-                autoFocus
-                placeholder="you@example.com"
-                aria-invalid={attempted && Boolean(fieldErrors.email)}
-                className={inputClass}
-              />
-            </AuthField>
-
-            <AuthField label="Password" icon={<Lock className="size-4" />} error={attempted ? fieldErrors.password : null}>
-              <input
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete={signingUp ? 'new-password' : 'current-password'}
-                placeholder={signingUp ? `At least ${MIN_PASSWORD} characters` : '••••••••'}
-                aria-invalid={attempted && Boolean(fieldErrors.password)}
-                className={cn(inputClass, 'pr-10')}
-              />
               <button
-                type="button"
-                onClick={() => setShowPassword((v) => !v)}
-                className="absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
-                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                type="submit"
+                disabled={submitting}
+                className="group mt-1 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-500 hover:shadow-[0_0_28px_-6px_rgba(99,102,241,0.9)] focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:outline-none active:scale-[0.99] disabled:cursor-wait disabled:opacity-70"
               >
-                {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                {submitting ? (
+                  <>
+                    <LoaderCircle className="size-4 animate-spin" />
+                    {signingUp ? 'Creating account…' : 'Signing in…'}
+                  </>
+                ) : (
+                  <>
+                    {signingUp ? 'Create account' : 'Sign in'}
+                    <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+                  </>
+                )}
               </button>
-            </AuthField>
+            </form>
 
-            <AnimatePresence initial={false}>
-              {error && (
-                <motion.div
-                  key="error"
-                  role="alert"
-                  initial={{ opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ duration: 0.15 }}
-                  className="flex items-start gap-2.5 rounded-xl border border-rose-500/25 bg-rose-500/10 px-3 py-2.5 text-[13px] text-rose-200"
-                >
-                  <CircleAlert className="mt-0.5 size-4 shrink-0 text-rose-400" />
-                  <p>{error}</p>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <button
-              type="submit"
-              disabled={submitting}
-              className="group mt-1 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-500 hover:shadow-[0_0_28px_-6px_rgba(99,102,241,0.9)] focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:outline-none active:scale-[0.99] disabled:cursor-wait disabled:opacity-70"
-            >
-              {submitting ? (
+            <p className="mt-5 text-center text-xs leading-relaxed text-zinc-500">
+              {signingUp ? (
                 <>
-                  <LoaderCircle className="size-4 animate-spin" />
-                  {signingUp ? 'Creating account…' : 'Signing in…'}
+                  Invited to a trip? Sign up with the email the invite went to and it will be waiting for you.
                 </>
               ) : (
                 <>
-                  {signingUp ? 'Create account' : 'Sign in'}
-                  <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+                  New here?{' '}
+                  <button type="button" onClick={() => switchMode('sign_up')} className="font-medium text-indigo-300 hover:text-indigo-200">
+                    Create an account
+                  </button>
                 </>
               )}
-            </button>
-          </form>
-
-          <p className="mt-5 text-center text-xs leading-relaxed text-zinc-500">
-            {signingUp ? (
-              <>
-                Invited to a trip? Sign up with the email the invite went to and it will be waiting for you.
-              </>
-            ) : (
-              <>
-                New here?{' '}
-                <button type="button" onClick={() => switchMode('sign_up')} className="font-medium text-indigo-300 hover:text-indigo-200">
-                  Create an account
-                </button>
-              </>
-            )}
-          </p>
+            </p>
+          </div>
         </div>
       </motion.div>
     </div>
+  );
+}
+
+/** "Maya invited you to join Tokyo Autumn Escape (Tokyo, Japan) as an editor". */
+function InviteBanner({ preview }: { preview: ShareLinkPreview }) {
+  const role = preview.role_code ?? 'viewer';
+  const dates =
+    preview.start_date && preview.end_date ? formatDateRangeLong(preview.start_date, preview.end_date) : null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      className="relative mb-3 overflow-hidden rounded-2xl border border-indigo-500/25 bg-indigo-500/[0.08] px-4 py-3.5 shadow-[0_20px_50px_-24px_rgba(99,102,241,0.6)] backdrop-blur-xl"
+      role="status"
+    >
+      <div className="flex items-start gap-3">
+        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-indigo-500/20 text-indigo-200 ring-1 ring-indigo-400/30">
+          <PlaneTakeoff className="size-[18px]" />
+        </span>
+        <div className="min-w-0 flex-1 text-[13px] leading-relaxed text-zinc-300">
+          <p>
+            <span className="font-medium text-zinc-100">{preview.owner_name?.trim() || 'A fellow traveler'}</span> invited you
+            to join <span className="font-semibold text-white">{preview.title ?? 'a trip'}</span>
+            {preview.destination_name && <span className="text-zinc-400"> ({preview.destination_name})</span>} as{' '}
+            {role === 'editor' ? 'an' : 'a'} <span className="font-semibold text-indigo-200">{ROLE_LABELS[role].toLowerCase()}</span>.
+          </p>
+          <p className="mt-1 text-xs text-zinc-400">
+            {dates && <span className="text-zinc-300">{dates} · </span>}
+            Sign in or create an account to jump straight in.
+          </p>
+        </div>
+      </div>
+    </motion.div>
   );
 }
 

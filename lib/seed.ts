@@ -1,5 +1,5 @@
 import { addDays } from 'date-fns';
-import type { PinCategory, Project, ProjectPin } from '@/types/trip';
+import type { PinCategory, Project, ProjectPin, TravelFolder } from '@/types/trip';
 import { toISODate } from '@/lib/utils';
 
 interface SeedPin {
@@ -128,6 +128,8 @@ const SEED_TRIPS: SeedTrip[] = [
 export interface SeedData {
   projects: Project[];
   pins: ProjectPin[];
+  /** Optional: demo data saved before folders existed has none. */
+  folders?: TravelFolder[];
 }
 
 /** Builds demo data with dates relative to `today`. */
@@ -176,5 +178,17 @@ export function buildSeedData(today: Date = new Date()): SeedData {
     });
   }
 
-  return { projects, pins };
+  // One sample "Project" so the folder UI has something to show: both Japan trips.
+  const folders: TravelFolder[] = [
+    {
+      id: '6f1c8a52-0b7e-4c1a-9a51-3c1f0f7d2f01',
+      owner_id: null,
+      name: 'Japan',
+      color_hex: '#ec4899',
+      created_at: createdAt,
+      project_ids: ['6f1c8a52-0b7e-4c1a-9a51-3c1f0f7d2a01', '6f1c8a52-0b7e-4c1a-9a51-3c1f0f7d2a03'],
+    },
+  ];
+
+  return { projects, pins, folders };
 }

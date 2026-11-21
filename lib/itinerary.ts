@@ -127,6 +127,11 @@ export function bucketLabel(bucket: BucketKey, days: TripDay[]): string {
   return day ? `Day ${day.index}` : 'Saved Places';
 }
 
+/** One colour per trip in a Project, in the order given (usually by start date). */
+export function tripColorMap(projectIds: string[]): Map<string, string> {
+  return new Map(projectIds.map((id, i) => [id, dayColor(i)]));
+}
+
 export function sumCost(pins: ProjectPin[]): number {
   return pins.reduce((total, pin) => total + (Number.isFinite(pin.cost) ? pin.cost : 0), 0);
 }

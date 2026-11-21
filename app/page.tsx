@@ -35,10 +35,22 @@ export default function Home() {
   const startAuth = useTripStore((s) => s.startAuth);
   const authStatus = useTripStore((s) => s.authStatus);
   const userId = useTripStore((s) => s.user?.id ?? null);
+  const openTripFromLink = useTripStore((s) => s.openTripFromLink);
   useViewportSync();
 
   // Restores the session, then follows sign-in / sign-out without reloading the page.
   useEffect(() => startAuth(), [startAuth]);
+
+  // `/?trip=<id>` (e.g. after joining via an invite link): hand it to the store, which opens
+  // the trip once the list has loaded, then drop the param so a refresh doesn't re-trigger it.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const tripId = url.searchParams.get('trip');
+    if (!tripId) return;
+    openTripFromLink(tripId);
+    url.searchParams.delete('trip');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [openTripFromLink]);
 
   return (
     <>

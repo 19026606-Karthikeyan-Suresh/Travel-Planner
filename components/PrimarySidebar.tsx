@@ -6,8 +6,10 @@ import { addDays } from 'date-fns';
 import {
   CalendarDays,
   Check,
+  ChevronDown,
   Cloud,
   Compass,
+  Folder as FolderIcon,
   HardDrive,
   LoaderCircle,
   LogOut,
@@ -17,17 +19,17 @@ import {
   Plus,
   RotateCcw,
   Search,
-  Trash2,
   X,
 } from 'lucide-react';
-import type { NewProjectInput, Project } from '@/types/trip';
+import type { NewProjectInput } from '@/types/trip';
 import { selectPrimaryDocked, selectPrimaryOpen, useTripStore } from '@/store/useTripStore';
 import { usePlaceSearch } from '@/hooks/usePlaceSearch';
 import type { PlaceResult } from '@/lib/geocode';
 import { resetDemoData } from '@/lib/supabaseClient';
 import { MAX_TRIP_DAYS, tripLength } from '@/lib/itinerary';
-import { cn, formatDateRange, formatDateRangeLong, parseISODate, toISODate, todayISO } from '@/lib/utils';
-import { Avatar, AvatarStack, personName } from '@/components/ui/Avatar';
+import { cn, formatDateRangeLong, parseISODate, toISODate, todayISO } from '@/lib/utils';
+import { Avatar, personName } from '@/components/ui/Avatar';
+import { ProjectsSection, TripGroup, tripMatches } from '@/components/sidebar/TripTree';
 
 /* -------------------------------------------------------------------------- */
 /*  Sidebar                                                                    */
@@ -44,12 +46,14 @@ export function PrimarySidebar() {
   const open = useTripStore(selectPrimaryOpen);
   const docked = useTripStore(selectPrimaryDocked);
   const setPrimaryOpen = useTripStore((s) => s.setPrimaryOpen);
-  const [modalOpen, setModalOpen] = useState(false);
+  const newTrip = useTripStore((s) => s.newTrip);
+  const openNewTrip = useTripStore((s) => s.openNewTrip);
+  const closeNewTrip = useTripStore((s) => s.closeNewTrip);
 
   const content = (
     <SidebarContent
       onNewTrip={() => {
-        setModalOpen(true);
+        openNewTrip(null);
         if (!docked) setPrimaryOpen(false);
       }}
       onNavigate={() => {
@@ -102,7 +106,7 @@ export function PrimarySidebar() {
           )}
         </AnimatePresence>
       )}
-      <NewTripModal open={modalOpen} onClose={() => setModalOpen(false)} />
+      <NewTripModal open={newTrip.open} folderId={newTrip.folderId} onClose={closeNewTrip} />
     </>
   );
 }
@@ -138,24 +142,27 @@ function SidebarContent({
   onCollapse: () => void;
 }) {
   const projects = useTripStore((s) => s.projects);
+  const folders = useTripStore((s) => s.folders);
   const status = useTripStore((s) => s.projectsStatus);
   const activeProjectId = useTripStore((s) => s.activeProjectId);
   const setActiveProject = useTripStore((s) => s.setActiveProject);
-  const deleteProject = useTripStore((s) => s.deleteProject);
   const mode = useTripStore((s) => s.mode);
   const [filter, setFilter] = useState('');
+  const query = filter.trim().toLowerCase();
 
-  const { upcoming, past } = useMemo(() => {
+  // Trips filed under a Project live there; only the rest appear in Upcoming / Past.
+  const { upcoming, past, matches } = useMemo(() => {
     const today = todayISO();
-    const q = filter.trim().toLowerCase();
-    const visible = q
-      ? projects.filter((p) => `${p.title} ${p.destination_name}`.toLowerCase().includes(q))
-      : projects;
+    const filed = new Set(folders.flatMap((f) => f.project_ids));
+    const visible = projects.filter((p) => tripMatches(p, query));
+    const loose = visible.filter((p) => !filed.has(p.id));
+    const folderHits = folders.filter((f) => query && f.name.toLowerCase().includes(query)).length;
     return {
-      upcoming: visible.filter((p) => p.end_date >= today).sort((a, b) => a.start_date.localeCompare(b.start_date)),
-      past: visible.filter((p) => p.end_date < today).sort((a, b) => b.end_date.localeCompare(a.end_date)),
+      upcoming: loose.filter((p) => p.end_date >= today).sort((a, b) => a.start_date.localeCompare(b.start_date)),
+      past: loose.filter((p) => p.end_date < today).sort((a, b) => b.end_date.localeCompare(a.end_date)),
+      matches: visible.length + folderHits,
     };
-  }, [projects, filter]);
+  }, [projects, folders, query]);
 
   const select = (id: string) => {
     setActiveProject(id);
@@ -200,7 +207,7 @@ function SidebarContent({
           <input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Search trips"
+            placeholder="Search trips and projects"
             className="w-full bg-transparent text-[13px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
           />
         </label>
@@ -208,17 +215,18 @@ function SidebarContent({
 
       <nav className="scrollbar-thin flex-1 overflow-y-auto px-2 pt-4 pb-3" aria-label="Trips">
         {status === 'loading' && <TripListSkeleton />}
+        {status === 'ready' && <ProjectsSection query={query} onNavigate={onNavigate} />}
         {status === 'ready' && projects.length === 0 && (
           <div className="mx-2 rounded-xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">
             No trips yet. Start one with <span className="text-zinc-300">New Trip</span>
             {mode === 'supabase' && ', or ask a friend to share theirs with your email'}.
           </div>
         )}
-        {status === 'ready' && filter && upcoming.length + past.length === 0 && (
-          <p className="px-3 text-xs text-zinc-500">No trips match “{filter}”.</p>
+        {status === 'ready' && query && matches === 0 && (
+          <p className="px-3 text-xs text-zinc-500">Nothing matches “{filter}”.</p>
         )}
-        <TripGroup label="Upcoming Trips" projects={upcoming} activeId={activeProjectId} onSelect={select} onDelete={deleteProject} />
-        <TripGroup label="Past Trips" projects={past} activeId={activeProjectId} onSelect={select} onDelete={deleteProject} />
+        <TripGroup label="Upcoming Trips" projects={upcoming} activeId={activeProjectId} onSelect={select} />
+        <TripGroup label="Past Trips" projects={past} activeId={activeProjectId} onSelect={select} />
       </nav>
 
       <div className="space-y-2 border-t border-zinc-800/80 p-3">
@@ -226,138 +234,6 @@ function SidebarContent({
         <SyncStatus />
       </div>
     </div>
-  );
-}
-
-function TripGroup({
-  label,
-  projects,
-  activeId,
-  onSelect,
-  onDelete,
-}: {
-  label: string;
-  projects: Project[];
-  activeId: string | null;
-  onSelect: (id: string) => void;
-  onDelete: (id: string) => Promise<void>;
-}) {
-  if (projects.length === 0) return null;
-  return (
-    <section className="mb-5">
-      <h3 className="px-3 pb-1.5 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">{label}</h3>
-      <ul className="space-y-0.5">
-        {projects.map((project) => (
-          <TripItem
-            key={project.id}
-            project={project}
-            active={project.id === activeId}
-            onSelect={() => onSelect(project.id)}
-            onDelete={() => void onDelete(project.id)}
-          />
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function TripItem({
-  project,
-  active,
-  onSelect,
-  onDelete,
-}: {
-  project: Project;
-  active: boolean;
-  onSelect: () => void;
-  onDelete: () => void;
-}) {
-  const [confirming, setConfirming] = useState(false);
-  const today = todayISO();
-  const ongoing = project.start_date <= today && project.end_date >= today;
-  const shared = project.members.length > 1;
-  const isOwner = project.currentUserRole === 'owner';
-  const people = project.members.map((m) => m.profile);
-
-  useEffect(() => {
-    if (!confirming) return;
-    const timer = window.setTimeout(() => setConfirming(false), 3000);
-    return () => window.clearTimeout(timer);
-  }, [confirming]);
-
-  return (
-    <li className="group relative">
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-current={active ? 'page' : undefined}
-        title={`${project.destination_name} · ${formatDateRangeLong(project.start_date, project.end_date)}${
-          shared ? `
-Shared with ${people.map(personName).join(', ')}` : ''
-        }`}
-        className={cn(
-          'relative flex w-full flex-col gap-1 rounded-lg py-2 pl-3 text-left transition-colors',
-          isOwner ? 'pr-9' : 'pr-3',
-          active ? 'bg-zinc-800/80 text-zinc-50' : 'text-zinc-300 hover:bg-zinc-900 hover:text-zinc-100',
-        )}
-      >
-        {active && (
-          <motion.span
-            layoutId="active-trip-pill"
-            className="absolute top-2 bottom-2 left-0 w-[3px] rounded-full bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.8)]"
-            transition={{ type: 'spring', stiffness: 500, damping: 40 }}
-          />
-        )}
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[13.5px] font-medium">{project.title}</span>
-          {shared && (
-            <AvatarStack
-              people={people}
-              max={3}
-              size="xs"
-              ringClassName={active ? 'ring-zinc-800' : 'ring-zinc-950'}
-              className="ml-auto shrink-0"
-            />
-          )}
-        </span>
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span
-            className={cn(
-              'shrink-0 rounded-md px-1.5 py-px text-[10.5px] font-medium tabular-nums',
-              active ? 'bg-indigo-500/15 text-indigo-300' : 'bg-zinc-800/80 text-zinc-400',
-            )}
-          >
-            {formatDateRange(project.start_date, project.end_date)}
-          </span>
-          {ongoing && (
-            <span className="flex shrink-0 items-center gap-1 text-[10.5px] text-emerald-400">
-              <span className="size-1.5 rounded-full bg-emerald-400" /> Now
-            </span>
-          )}
-          {shared && !isOwner && (
-            <span className="shrink-0 rounded-md border border-zinc-700/70 px-1 py-px text-[10px] text-zinc-400">
-              {project.currentUserRole === 'viewer' ? 'View only' : 'Shared'}
-            </span>
-          )}
-          <span className="truncate text-[11px] text-zinc-500">{project.destination_name}</span>
-        </span>
-      </button>
-      {isOwner && (
-        <button
-          type="button"
-          onClick={() => (confirming ? onDelete() : setConfirming(true))}
-          aria-label={confirming ? `Confirm delete ${project.title}` : `Delete ${project.title}`}
-          className={cn(
-            'absolute top-2 right-1.5 rounded-md p-1 transition-all',
-            confirming
-              ? 'bg-rose-500/15 text-rose-300 opacity-100'
-              : 'text-zinc-500 opacity-0 group-hover:opacity-100 hover:bg-zinc-700/60 hover:text-zinc-200 focus-visible:opacity-100',
-          )}
-        >
-          {confirming ? <Check className="size-3.5" /> : <Trash2 className="size-3.5" />}
-        </button>
-      )}
-    </li>
   );
 }
 
@@ -483,7 +359,7 @@ function defaultDates(): { start: string; end: string } {
   return { start: toISODate(start), end: toISODate(addDays(start, 4)) };
 }
 
-function NewTripModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function NewTripModal({ open, folderId, onClose }: { open: boolean; folderId: string | null; onClose: () => void }) {
   return (
     <AnimatePresence>
       {open && (
@@ -506,7 +382,7 @@ function NewTripModal({ open, onClose }: { open: boolean; onClose: () => void })
             transition={{ type: 'spring', stiffness: 460, damping: 34 }}
             className="relative w-full max-w-[460px] rounded-2xl border border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/60"
           >
-            <NewTripForm onClose={onClose} />
+            <NewTripForm initialFolderId={folderId} onClose={onClose} />
           </motion.div>
         </motion.div>
       )}
@@ -514,8 +390,13 @@ function NewTripModal({ open, onClose }: { open: boolean; onClose: () => void })
   );
 }
 
-function NewTripForm({ onClose }: { onClose: () => void }) {
+function NewTripForm({ initialFolderId, onClose }: { initialFolderId: string | null; onClose: () => void }) {
   const createProject = useTripStore((s) => s.createProject);
+  const folders = useTripStore((s) => s.folders);
+  const [folderId, setFolderId] = useState<string | null>(
+    initialFolderId && folders.some((f) => f.id === initialFolderId) ? initialFolderId : null,
+  );
+  const folder = folders.find((f) => f.id === folderId);
   const [initialDates] = useState(defaultDates);
   const [title, setTitle] = useState('');
   const [query, setQuery] = useState('');
@@ -591,7 +472,7 @@ function NewTripForm({ onClose }: { onClose: () => void }) {
       end_date: endDate,
     };
     onClose();
-    await createProject(input);
+    await createProject(input, folderId);
   };
 
   return (
@@ -601,7 +482,15 @@ function NewTripForm({ onClose }: { onClose: () => void }) {
           <h2 id="new-trip-title" className="text-base font-semibold tracking-tight">
             Plan a new trip
           </h2>
-          <p className="mt-0.5 text-[13px] text-zinc-500">Days are generated from your dates automatically.</p>
+          <p className="mt-0.5 text-[13px] text-zinc-500">
+            {folder ? (
+              <>
+                Adding a city to <span style={{ color: folder.color_hex }}>{folder.name}</span>. Days come from your dates.
+              </>
+            ) : (
+              'Days are generated from your dates automatically.'
+            )}
+          </p>
         </div>
         <button
           type="button"
@@ -762,6 +651,31 @@ function NewTripForm({ onClose }: { onClose: () => void }) {
             </span>
           )}
         </div>
+
+        {folders.length > 0 && (
+          <Field label="Project (optional)">
+            <div className="relative">
+              <FolderIcon
+                className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                style={{ color: folder?.color_hex ?? '#71717a' }}
+                fill={folder ? `${folder.color_hex}33` : 'none'}
+              />
+              <select
+                value={folderId ?? ''}
+                onChange={(e) => setFolderId(e.target.value || null)}
+                className={cn(inputClass, 'appearance-none pl-9')}
+              >
+                <option value="">None — keep it with my other trips</option>
+                {folders.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute top-1/2 right-3 size-4 -translate-y-1/2 text-zinc-500" />
+            </div>
+          </Field>
+        )}
       </div>
 
       <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3.5">

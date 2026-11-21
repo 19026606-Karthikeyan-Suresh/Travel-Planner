@@ -19,7 +19,9 @@ import {
   type ProjectMember,
   type ProjectPin,
   type ProjectUpdate,
+  type TravelFolder,
   type UserProfile,
+  DEFAULT_FOLDER_COLOR,
 } from '@/types/trip';
 import { getTripService, onAuthChange, signOutUser, sortMembers, type DataMode } from '@/lib/supabaseClient';
 import { bucketOf, getTripDays } from '@/lib/itinerary';
@@ -73,6 +75,21 @@ interface TripState {
   invitations: Record<string, ProjectInvitation[]>;
   collaboratorsStatus: Record<string, LoadStatus>;
 
+  /** "Projects" in the UI: user-owned groups of trips (e.g. China → Chengdu, Kunming, Dali). */
+  folders: TravelFolder[];
+  foldersStatus: LoadStatus;
+  /** A folder open in Project Overview. Mutually exclusive with `activeProjectId`. */
+  activeFolderId: string | null;
+  /** Every pin across the active folder's trips, for the overview map. */
+  folderPins: ProjectPin[];
+  folderPinsStatus: LoadStatus;
+  /** Sidebar disclosure state; unset = expanded only while it holds the open trip. */
+  expandedFolders: Record<string, boolean>;
+  /** New Trip modal; `folderId` pre-selects its Project picker. */
+  newTrip: { open: boolean; folderId: string | null };
+  /** `?trip=<id>` from a join redirect, applied once trips have loaded. */
+  deepLinkTripId: string | null;
+
   activeProjectId: string | null;
   activeTab: WorkspaceTab;
   hoveredPinId: string | null;
@@ -100,7 +117,9 @@ interface TripState {
   loadProjects: () => Promise<void>;
 
   setActiveProject: (id: string | null) => void;
-  createProject: (input: NewProjectInput) => Promise<Project | null>;
+  /** Opens a trip from a link; reloads the list if it was joined after trips loaded. */
+  openTripFromLink: (id: string) => void;
+  createProject: (input: NewProjectInput, folderId?: string | null) => Promise<Project | null>;
   updateProject: (id: string, patch: ProjectUpdate) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   leaveProject: (id: string) => Promise<boolean>;
@@ -117,6 +136,16 @@ interface TripState {
   updateCollaboratorRole: (projectId: string, userId: string, role: InvitableRole) => Promise<void>;
   removeCollaborator: (projectId: string, userId: string) => Promise<void>;
   revokeInvitation: (projectId: string, invitationId: string) => Promise<void>;
+
+  loadFolders: () => Promise<void>;
+  setActiveFolder: (id: string | null) => void;
+  toggleFolder: (id: string, expanded?: boolean) => void;
+  createFolder: (name: string, colorHex?: string) => Promise<TravelFolder | null>;
+  renameFolder: (id: string, name: string, colorHex: string) => Promise<void>;
+  deleteFolder: (id: string) => Promise<void>;
+  assignProjectToFolder: (projectId: string, folderId: string | null) => Promise<void>;
+  openNewTrip: (folderId?: string | null) => void;
+  closeNewTrip: () => void;
 
   setActiveTab: (tab: WorkspaceTab) => void;
   setHoveredPin: (id: string | null) => void;
@@ -177,6 +206,13 @@ const SIGNED_OUT_DATA = {
   collaborators: {},
   invitations: {},
   collaboratorsStatus: {},
+  folders: [],
+  foldersStatus: 'idle',
+  activeFolderId: null,
+  folderPins: [],
+  folderPinsStatus: 'idle',
+  expandedFolders: {},
+  newTrip: { open: false, folderId: null },
   activeProjectId: null,
   activeTab: 'itinerary',
   hoveredPinId: null,
@@ -264,8 +300,66 @@ export const useTripStore = create<TripState>()((set, get) => {
       const { [id]: _pins, ...pinsByProject } = s.pinsByProject;
       const { [id]: _members, ...collaborators } = s.collaborators;
       const { [id]: _invites, ...invitations } = s.invitations;
-      return { projects: s.projects.filter((p) => p.id !== id), pinsByProject, collaborators, invitations };
+      return {
+        projects: s.projects.filter((p) => p.id !== id),
+        pinsByProject,
+        collaborators,
+        invitations,
+        folders: withoutProject(s.folders, id),
+        folderPins: s.folderPins.filter((pin) => pin.project_id !== id),
+      };
     });
+  }
+
+  /** A folder's trips that this user can still see, earliest first. */
+  function folderTripIds(folderId: string): string[] {
+    const folder = get().folders.find((f) => f.id === folderId);
+    return folder ? folderTrips(folder, get().projects).map((p) => p.id) : [];
+  }
+
+  /** Overview pins: shows cached trips instantly, then the fresh multi-trip query. */
+  async function loadFolderPins(folderId: string): Promise<void> {
+    const ids = folderTripIds(folderId);
+    const cachedPins = (s: TripState, id: string) => (s.pinsStatus[id] === 'ready' ? s.pinsByProject[id] : undefined);
+    set((s) => ({
+      folderPins: ids.flatMap((id) => cachedPins(s, id) ?? EMPTY_PINS),
+      folderPinsStatus: ids.length === 0 ? 'ready' : 'loading',
+    }));
+    camera({ kind: 'fit' });
+    if (ids.length === 0) return;
+    try {
+      const pins = await service.listPinsForProjects(ids);
+      if (get().activeFolderId !== folderId) return;
+      const grouped = new Map<string, ProjectPin[]>(ids.map((id) => [id, []]));
+      for (const pin of pins) grouped.get(pin.project_id)?.push(pin);
+      set((s) => {
+        const pinsByProject = { ...s.pinsByProject };
+        const pinsStatus = { ...s.pinsStatus };
+        for (const [id, list] of grouped) {
+          // Seed trips we haven't opened yet so a card click opens instantly; never
+          // clobber one that's loaded, since it may carry unsaved optimistic edits.
+          if (pinsStatus[id] === 'ready' || pinsStatus[id] === 'loading') continue;
+          pinsByProject[id] = list;
+          pinsStatus[id] = 'ready';
+        }
+        return {
+          pinsByProject,
+          pinsStatus,
+          folderPins: ids.flatMap((id) => cachedPins(s, id) ?? grouped.get(id) ?? EMPTY_PINS),
+          folderPinsStatus: 'ready',
+        };
+      });
+      camera({ kind: 'fit' });
+    } catch (error) {
+      if (get().activeFolderId !== folderId) return;
+      set({ folderPinsStatus: 'error' });
+      get().notify(`Couldn't load this project's places: ${errorMessage(error)}`, 'error');
+    }
+  }
+
+  function refreshOverviewIfShowing(...folderIds: (string | null)[]): void {
+    const active = get().activeFolderId;
+    if (active && folderIds.includes(active)) void loadFolderPins(active);
   }
 
   async function loadPins(projectId: string): Promise<void> {
@@ -306,6 +400,7 @@ export const useTripStore = create<TripState>()((set, get) => {
     authStatus: service.mode === 'demo' ? 'disabled' : 'loading',
 
     ...SIGNED_OUT_DATA,
+    deepLinkTripId: null,
     cameraCommand: null,
     mapCenter: null,
 
@@ -338,6 +433,8 @@ export const useTripStore = create<TripState>()((set, get) => {
       if (get().projectsStatus !== 'idle') return;
       const user = get().user;
       set({ projectsStatus: 'loading' });
+      // Folders load alongside; a failure there must not block the trip list.
+      if (get().foldersStatus !== 'loading') void get().loadFolders();
       try {
         let projects = await service.listProjects(user);
         // First sign-in on a fresh schema: adopt the legacy (pre-auth) trips.
@@ -352,10 +449,17 @@ export const useTripStore = create<TripState>()((set, get) => {
         }
         // The account changed while we were loading: that load owns the state now.
         if (get().user?.id !== user?.id) return;
-        set({ projects, projectsStatus: 'ready' });
+        const linkedId = get().deepLinkTripId;
+        set({ projects, projectsStatus: 'ready', deepLinkTripId: null });
+        const linked = linkedId ? projects.find((p) => p.id === linkedId) : undefined;
+        if (linked) {
+          get().setActiveProject(linked.id);
+          return;
+        }
+        if (linkedId) get().notify('That trip isn’t available to this account.', 'error');
         // Projects arrive newest-first; open the first so the workspace is populated on first paint.
         const first = projects[0];
-        if (first && get().activeProjectId === null) get().setActiveProject(first.id);
+        if (first && get().activeProjectId === null && get().activeFolderId === null) get().setActiveProject(first.id);
         else camera({ kind: 'fit' });
       } catch (error) {
         if (get().user?.id !== user?.id) return;
@@ -365,9 +469,12 @@ export const useTripStore = create<TripState>()((set, get) => {
     },
 
     setActiveProject: (id) => {
-      if (id === get().activeProjectId) return;
+      if (id === get().activeProjectId && get().activeFolderId === null) return;
       set({
         activeProjectId: id,
+        activeFolderId: null,
+        folderPins: EMPTY_PINS,
+        folderPinsStatus: 'idle',
         activeTab: 'itinerary',
         hoveredPinId: null,
         selectedPinId: null,
@@ -384,7 +491,25 @@ export const useTripStore = create<TripState>()((set, get) => {
       else if (status !== 'loading') void loadPins(id);
     },
 
-    createProject: async (input) => {
+    openTripFromLink: (id) => {
+      const { projectsStatus, projects } = get();
+      if (projectsStatus !== 'ready') {
+        // Applied by loadProjects once the list arrives.
+        set({ deepLinkTripId: id });
+        return;
+      }
+      if (projects.some((p) => p.id === id)) {
+        get().setActiveProject(id);
+        return;
+      }
+      // Joined after the list loaded (e.g. via an invite link): fetch it again.
+      set({ deepLinkTripId: id, projectsStatus: 'idle' });
+      void get().loadProjects();
+    },
+
+    createProject: async (input, requestedFolderId = null) => {
+      const folderId =
+        requestedFolderId && get().folders.some((f) => f.id === requestedFolderId) ? requestedFolderId : null;
       const user = get().user;
       const now = new Date().toISOString();
       const id = newId();
@@ -401,6 +526,12 @@ export const useTripStore = create<TripState>()((set, get) => {
         pinsByProject: { ...s.pinsByProject, [project.id]: [] },
         pinsStatus: { ...s.pinsStatus, [project.id]: 'ready' },
       }));
+      if (folderId) {
+        set((s) => ({
+          folders: s.folders.map((f) => (f.id === folderId ? { ...f, project_ids: [...f.project_ids, project.id] } : f)),
+          expandedFolders: { ...s.expandedFolders, [folderId]: true },
+        }));
+      }
       get().setActiveProject(project.id);
       const saved = await persist(
         () => service.createProject(project, user),
@@ -408,11 +539,20 @@ export const useTripStore = create<TripState>()((set, get) => {
           set((s) => ({
             projects: s.projects.filter((p) => p.id !== project.id),
             activeProjectId: s.activeProjectId === project.id ? null : s.activeProjectId,
+            folders: withoutProject(s.folders, project.id),
           }));
         },
         "Couldn't create trip",
       );
       if (saved) set((s) => ({ projects: s.projects.map((p) => (p.id === saved.id ? saved : p)) }));
+      if (saved && folderId) {
+        // Queued after the insert, so the trip exists by the time it's filed.
+        await persist(
+          () => service.assignProjectToFolder(project.id, folderId),
+          () => set((s) => ({ folders: withoutProject(s.folders, project.id) })),
+          "Trip created, but couldn't add it to the project",
+        );
+      }
       return saved;
     },
 
@@ -459,10 +599,16 @@ export const useTripStore = create<TripState>()((set, get) => {
       const previous = projects[index];
       if (!previous || !guardOwner(id, 'Only the trip owner can delete it. You can leave it from Share instead.')) return;
       const previousPins = pinsByProject[id];
+      const previousFolders = get().folders;
       if (activeProjectId === id) get().setActiveProject(null);
       set((s) => {
         const { [id]: _removed, ...rest } = s.pinsByProject;
-        return { projects: s.projects.filter((p) => p.id !== id), pinsByProject: rest };
+        return {
+          projects: s.projects.filter((p) => p.id !== id),
+          pinsByProject: rest,
+          folders: withoutProject(s.folders, id),
+          folderPins: s.folderPins.filter((pin) => pin.project_id !== id),
+        };
       });
       await persist(
         () => service.deleteProject(id),
@@ -473,6 +619,7 @@ export const useTripStore = create<TripState>()((set, get) => {
             return {
               projects: restored,
               pinsByProject: previousPins ? { ...s.pinsByProject, [id]: previousPins } : s.pinsByProject,
+              folders: previousFolders,
             };
           });
         },
@@ -696,6 +843,145 @@ export const useTripStore = create<TripState>()((set, get) => {
       );
     },
 
+    /* ------------------------------------------------ folders (Projects) --- */
+
+    loadFolders: async () => {
+      const userId = get().user?.id ?? null;
+      set({ foldersStatus: 'loading' });
+      try {
+        const folders = await service.listFolders();
+        if ((get().user?.id ?? null) !== userId) return;
+        set({ folders, foldersStatus: 'ready' });
+        refreshOverviewIfShowing(get().activeFolderId);
+      } catch (error) {
+        if ((get().user?.id ?? null) !== userId) return;
+        set({ foldersStatus: 'error' });
+        get().notify(`Couldn't load your projects: ${errorMessage(error)}`, 'error');
+      }
+    },
+
+    setActiveFolder: (id) => {
+      if (id === null) {
+        if (get().activeFolderId === null) return;
+        set({ activeFolderId: null, folderPins: EMPTY_PINS, folderPinsStatus: 'idle' });
+        camera({ kind: 'fit' });
+        return;
+      }
+      if (id === get().activeFolderId) return;
+      set((s) => ({
+        activeFolderId: id,
+        activeProjectId: null,
+        activeTab: 'itinerary',
+        hoveredPinId: null,
+        selectedPinId: null,
+        dayFilter: 'all',
+        draftPin: null,
+        mobilePanel: 'workspace',
+        expandedFolders: { ...s.expandedFolders, [id]: true },
+      }));
+      void loadFolderPins(id);
+    },
+
+    toggleFolder: (id, expanded) => {
+      const folder = get().folders.find((f) => f.id === id);
+      if (!folder) return;
+      set((s) => ({ expandedFolders: { ...s.expandedFolders, [id]: expanded ?? !isFolderExpanded(s, folder) } }));
+    },
+
+    createFolder: async (name, colorHex = DEFAULT_FOLDER_COLOR) => {
+      const trimmed = name.trim();
+      if (!trimmed) return null;
+      const folder: TravelFolder = {
+        id: newId(),
+        owner_id: get().user?.id ?? null,
+        name: trimmed,
+        color_hex: colorHex,
+        created_at: new Date().toISOString(),
+        project_ids: [],
+      };
+      set((s) => ({ folders: [...s.folders, folder], expandedFolders: { ...s.expandedFolders, [folder.id]: true } }));
+      const saved = await persist(
+        () => service.createFolder(folder),
+        () => set((s) => ({ folders: s.folders.filter((f) => f.id !== folder.id) })),
+        "Couldn't create project",
+      );
+      if (!saved) return null;
+      // Keep any trips filed into it while the insert was in flight.
+      set((s) => ({ folders: s.folders.map((f) => (f.id === folder.id ? { ...saved, project_ids: f.project_ids } : f)) }));
+      return folder;
+    },
+
+    renameFolder: async (id, name, colorHex) => {
+      const trimmed = name.trim();
+      const previous = get().folders.find((f) => f.id === id);
+      if (!previous || !trimmed || (trimmed === previous.name && colorHex === previous.color_hex)) return;
+      const patch = (folder: TravelFolder) => set((s) => ({ folders: s.folders.map((f) => (f.id === id ? folder : f)) }));
+      patch({ ...previous, name: trimmed, color_hex: colorHex });
+      await persist(
+        () => service.updateFolder(id, trimmed, colorHex),
+        () => patch(previous),
+        "Couldn't rename project",
+      );
+    },
+
+    deleteFolder: async (id) => {
+      const previous = get().folders;
+      const folder = previous.find((f) => f.id === id);
+      if (!folder) return;
+      set((s) => ({ folders: s.folders.filter((f) => f.id !== id) }));
+      if (get().activeFolderId === id) get().setActiveFolder(null);
+      const removed = await persist(
+        async () => {
+          await service.deleteFolder(id);
+          return true;
+        },
+        () => set({ folders: previous }),
+        "Couldn't delete project",
+      );
+      if (removed) {
+        const count = folderTrips(folder, get().projects).length;
+        get().notify(
+          count > 0
+            ? `Deleted “${folder.name}”. Its ${count} trip${count === 1 ? ' is' : 's are'} back in your trip list.`
+            : `Deleted “${folder.name}”.`,
+          'info',
+        );
+      }
+    },
+
+    assignProjectToFolder: async (projectId, folderId) => {
+      const previous = get().folders;
+      const from = folderOfProject(previous, projectId);
+      const to = folderId ? previous.find((f) => f.id === folderId) : undefined;
+      if ((from?.id ?? null) === folderId || (folderId && !to)) return;
+      set((s) => ({
+        folders: s.folders.map((f) => {
+          const without = f.project_ids.filter((id) => id !== projectId);
+          return { ...f, project_ids: f.id === folderId ? [...without, projectId] : without };
+        }),
+        expandedFolders: folderId ? { ...s.expandedFolders, [folderId]: true } : s.expandedFolders,
+      }));
+      refreshOverviewIfShowing(folderId, from?.id ?? null);
+      const moved = await persist(
+        async () => {
+          await service.assignProjectToFolder(projectId, folderId);
+          return true;
+        },
+        () => {
+          set({ folders: previous });
+          refreshOverviewIfShowing(folderId, from?.id ?? null);
+        },
+        "Couldn't move trip",
+      );
+      if (!moved) return;
+      const title = get().projects.find((p) => p.id === projectId)?.title ?? 'Trip';
+      get().notify(to ? `Moved “${title}” to ${to.name}` : `Removed “${title}” from ${from?.name ?? 'its project'}`, 'info');
+    },
+
+    openNewTrip: (folderId = null) => set({ newTrip: { open: true, folderId } }),
+
+    closeNewTrip: () => set((s) => ({ newTrip: { ...s.newTrip, open: false } })),
+
     /* -------------------------------------------------------------- UI --- */
 
     setActiveTab: (tab) => set({ activeTab: tab }),
@@ -791,6 +1077,33 @@ export const selectCurrentUserRole = (s: TripState): CollaboratorRole =>
 export const selectCanEdit = (s: TripState): boolean => canEditRole(selectCurrentUserRole(s));
 
 export const selectCanManageMembers = (s: TripState): boolean => canManageMembers(selectCurrentUserRole(s));
+
+export const selectActiveFolder = (s: TripState): TravelFolder | undefined =>
+  s.activeFolderId ? s.folders.find((f) => f.id === s.activeFolderId) : undefined;
+
+/** The folder a trip is filed under, if any (a trip lives in at most one). */
+export function folderOfProject(folders: TravelFolder[], projectId: string): TravelFolder | undefined {
+  return folders.find((f) => f.project_ids.includes(projectId));
+}
+
+/** A folder's trips the user can see, earliest start first. */
+export function folderTrips(folder: TravelFolder, projects: Project[]): Project[] {
+  const ids = new Set(folder.project_ids);
+  return projects.filter((p) => ids.has(p.id)).sort((a, b) => a.start_date.localeCompare(b.start_date));
+}
+
+/** Explicit toggle wins; otherwise open while it's in focus or holds the open trip. */
+export function isFolderExpanded(s: Pick<TripState, 'expandedFolders' | 'activeFolderId' | 'activeProjectId'>, folder: TravelFolder): boolean {
+  const explicit = s.expandedFolders[folder.id];
+  if (explicit !== undefined) return explicit;
+  return s.activeFolderId === folder.id || (s.activeProjectId !== null && folder.project_ids.includes(s.activeProjectId));
+}
+
+function withoutProject(folders: TravelFolder[], projectId: string): TravelFolder[] {
+  return folders.some((f) => f.project_ids.includes(projectId))
+    ? folders.map((f) => ({ ...f, project_ids: f.project_ids.filter((id) => id !== projectId) }))
+    : folders;
+}
 
 export const selectPrimaryOpen = (s: TripState): boolean => s.primaryOpen ?? s.viewport === 'wide';
 

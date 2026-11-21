@@ -16,8 +16,13 @@ import {
   type ProjectMember,
   type ProjectPin,
   type ProjectRecord,
+  type ProjectShareLink,
   type ProjectUpdate,
+  type ShareLinkAcceptResult,
+  type ShareLinkPreview,
+  type TravelFolder,
   type UserProfile,
+  DEFAULT_FOLDER_COLOR,
 } from '@/types/trip';
 import { buildSeedData, type SeedData } from '@/lib/seed';
 
@@ -109,6 +114,23 @@ type InvitationInsert = Row<{
   created_at?: string;
 }>;
 
+type ShareLinkRow = Row<{
+  id: string;
+  project_id: string;
+  token: string;
+  role_code: string;
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string;
+}>;
+type ShareLinkInsert = Row<Partial<ShareLinkRow> & { project_id: string }>;
+
+type FolderRow = Row<{ id: string; owner_id: string | null; name: string; color_hex: string | null; created_at: string }>;
+type FolderInsert = Row<{ id?: string; owner_id?: string | null; name: string; color_hex?: string | null; created_at?: string }>;
+
+type FolderProjectRow = Row<{ folder_id: string; project_id: string; added_at: string | null }>;
+type FolderProjectInsert = Row<{ folder_id: string; project_id: string; added_at?: string }>;
+
 type Table<R, I, Rel extends unknown[] = []> = { Row: R; Insert: I; Update: Row<Partial<I>>; Relationships: Rel };
 
 export interface Database {
@@ -182,9 +204,49 @@ export interface Database {
           },
         ]
       >;
+      project_share_links: Table<
+        ShareLinkRow,
+        ShareLinkInsert,
+        [
+          {
+            foreignKeyName: 'project_share_links_project_id_fkey';
+            columns: ['project_id'];
+            isOneToOne: true;
+            referencedRelation: 'projects';
+            referencedColumns: ['id'];
+          },
+        ]
+      >;
+      travel_folders: Table<FolderRow, FolderInsert>;
+      folder_projects: Table<
+        FolderProjectRow,
+        FolderProjectInsert,
+        [
+          {
+            foreignKeyName: 'folder_projects_folder_id_fkey';
+            columns: ['folder_id'];
+            isOneToOne: false;
+            referencedRelation: 'travel_folders';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'folder_projects_project_id_fkey';
+            columns: ['project_id'];
+            isOneToOne: false;
+            referencedRelation: 'projects';
+            referencedColumns: ['id'];
+          },
+        ]
+      >;
     };
     Views: Record<never, never>;
     Functions: {
+      get_or_create_share_link: { Args: { p_project_id: string; p_role: string }; Returns: Json };
+      regenerate_share_link: { Args: { p_project_id: string; p_role: string }; Returns: Json };
+      revoke_share_link: { Args: { p_project_id: string }; Returns: Json };
+      get_share_link_preview: { Args: { p_token: string }; Returns: Json };
+      accept_share_link: { Args: { p_token: string }; Returns: Json };
+      assign_project_to_folder: { Args: { p_project_id: string; p_folder_id: string | null }; Returns: Json };
       invite_collaborator: {
         Args: { p_project_id: string; p_email: string; p_role: string };
         Returns: Json;
@@ -395,18 +457,89 @@ function toInvitation(row: InvitationRow): ProjectInvitation {
   };
 }
 
-/** The RPC may return a JSON object or a one-row set, depending on how it's declared. */
-function toInviteResult(data: Json, email: string, role: InvitableRole): InviteResult {
+type JsonRecord = { [key: string]: Json | undefined };
+
+/** RPCs may return a JSON object, a composite row, or a one-row set depending on how they're declared. */
+function firstRecord(data: Json | undefined): JsonRecord | null {
   const value = Array.isArray(data) ? data[0] : data;
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const status = value.status === 'added' ? 'added' : 'invited';
-    return {
-      status,
-      email: typeof value.email === 'string' ? value.email : email,
-      role: toInvitableRole(typeof value.role === 'string' ? value.role : role),
-    };
-  }
-  return { status: 'invited', email, role };
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+const asString = (value: Json | undefined): string | undefined => (typeof value === 'string' ? value : undefined);
+
+function toInviteResult(data: Json, email: string, role: InvitableRole): InviteResult {
+  const value = firstRecord(data);
+  if (!value) return { status: 'invited', email, role };
+  return {
+    status: value.status === 'added' ? 'added' : 'invited',
+    email: asString(value.email) ?? email,
+    role: toInvitableRole(asString(value.role) ?? role),
+  };
+}
+
+function toShareLink(data: Json | ShareLinkRow | null | undefined): ProjectShareLink | null {
+  const value = data && typeof data === 'object' ? firstRecord(data as Json) : null;
+  const token = asString(value?.token);
+  const projectId = asString(value?.project_id);
+  if (!value || !token || !projectId) return null;
+  return {
+    id: asString(value.id) ?? token,
+    project_id: projectId,
+    token,
+    role_code: toInvitableRole(asString(value.role_code)),
+    is_active: value.is_active !== false,
+    created_by: asString(value.created_by) ?? null,
+    created_at: asString(value.created_at) ?? new Date().toISOString(),
+  };
+}
+
+function requireShareLink(data: Json): ProjectShareLink {
+  const link = toShareLink(data);
+  if (!link) throw new Error('The server returned no invite link');
+  return link;
+}
+
+function toSharePreview(data: Json): ShareLinkPreview {
+  const value = firstRecord(data);
+  if (!value || value.valid !== true) return { valid: false };
+  const role = asString(value.role_code);
+  return {
+    valid: true,
+    project_id: asString(value.project_id),
+    title: asString(value.title),
+    destination_name: asString(value.destination_name),
+    start_date: asString(value.start_date),
+    end_date: asString(value.end_date),
+    role_code: role ? toInvitableRole(role) : undefined,
+    owner_name: asString(value.owner_name) ?? null,
+  };
+}
+
+function toAcceptResult(data: Json): ShareLinkAcceptResult {
+  const value = firstRecord(data);
+  const projectId = asString(value?.project_id);
+  if (!value || !projectId) throw new Error('Joining failed: the server returned no trip');
+  return {
+    status: value.status === 'already_member' ? 'already_member' : 'joined',
+    project_id: projectId,
+    title: asString(value.title) ?? 'this trip',
+    role_code: toRole(asString(value.role_code)),
+  };
+}
+
+interface RawFolder extends FolderRow {
+  folder_projects?: { project_id: string }[] | null;
+}
+
+function toFolder(raw: RawFolder): TravelFolder {
+  return {
+    id: raw.id,
+    owner_id: raw.owner_id,
+    name: raw.name,
+    color_hex: raw.color_hex || DEFAULT_FOLDER_COLOR,
+    created_at: raw.created_at,
+    project_ids: (raw.folder_projects ?? []).map((row) => row.project_id),
+  };
 }
 
 function placeFields(pin: ProjectPin): PlaceInsert {
@@ -487,6 +620,27 @@ export interface TripService {
   updateCollaboratorRole(projectId: string, userId: string, role: InvitableRole): Promise<void>;
   removeCollaborator(projectId: string, userId: string): Promise<void>;
   revokeInvitation(invitationId: string): Promise<void>;
+
+  /** The trip's link (active or disabled), or null if one was never made. Owners only. */
+  getShareLink(projectId: string): Promise<ProjectShareLink | null>;
+  /** Creates the link, or re-enables it / changes its role, keeping the same token. */
+  enableShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink>;
+  /** New token; the old URL stops working. */
+  regenerateShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink>;
+  revokeShareLink(projectId: string): Promise<void>;
+  /** Callable signed out: tells a visitor what they're about to join. */
+  getShareLinkPreview(token: string): Promise<ShareLinkPreview>;
+  acceptShareLink(token: string): Promise<ShareLinkAcceptResult>;
+
+  listFolders(): Promise<TravelFolder[]>;
+  createFolder(folder: TravelFolder): Promise<TravelFolder>;
+  updateFolder(folderId: string, name: string, colorHex: string): Promise<void>;
+  /** Trips inside survive; they just stop being grouped. */
+  deleteFolder(folderId: string): Promise<void>;
+  /** Moves a trip into a folder (out of any other), or out of every folder when `folderId` is null. */
+  assignProjectToFolder(projectId: string, folderId: string | null): Promise<void>;
+  /** Pins for several trips at once (Project Overview map). */
+  listPinsForProjects(projectIds: string[]): Promise<ProjectPin[]>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -674,6 +828,117 @@ class SupabaseTripService implements TripService {
     const { error } = await this.client.from('project_invitations').delete().eq('id', invitationId);
     if (error) throw error;
   }
+
+  /* ------------------------------------------------------- share links --- */
+
+  async getShareLink(projectId: string): Promise<ProjectShareLink | null> {
+    const { data, error } = await this.client
+      .from('project_share_links')
+      .select('*')
+      .eq('project_id', projectId)
+      .maybeSingle();
+    if (error) throw error;
+    return toShareLink(data);
+  }
+
+  async enableShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink> {
+    const { data, error } = await this.client.rpc('get_or_create_share_link', { p_project_id: projectId, p_role: role });
+    if (error) throw error;
+    const link = requireShareLink(data);
+    if (link.is_active && link.role_code === role) return link;
+
+    // An existing link came back unchanged: switch its role / re-enable it, keeping the token.
+    const { data: updated, error: updateError } = await this.client
+      .from('project_share_links')
+      .update({ role_code: role, is_active: true })
+      .eq('project_id', projectId)
+      .select('*')
+      .maybeSingle();
+    if (updateError) throw updateError;
+    return toShareLink(updated) ?? { ...link, role_code: role, is_active: true };
+  }
+
+  async regenerateShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink> {
+    const { data, error } = await this.client.rpc('regenerate_share_link', { p_project_id: projectId, p_role: role });
+    if (error) throw error;
+    return requireShareLink(data);
+  }
+
+  async revokeShareLink(projectId: string): Promise<void> {
+    const { error } = await this.client.rpc('revoke_share_link', { p_project_id: projectId });
+    if (error) throw error;
+  }
+
+  async getShareLinkPreview(token: string): Promise<ShareLinkPreview> {
+    const { data, error } = await this.client.rpc('get_share_link_preview', { p_token: token });
+    if (error) throw error;
+    return toSharePreview(data);
+  }
+
+  async acceptShareLink(token: string): Promise<ShareLinkAcceptResult> {
+    const { data, error } = await this.client.rpc('accept_share_link', { p_token: token });
+    if (error) throw error;
+    return toAcceptResult(data);
+  }
+
+  /* ----------------------------------------------------------- folders --- */
+
+  async listFolders(): Promise<TravelFolder[]> {
+    const { data, error } = await this.client
+      .from('travel_folders')
+      .select('*, folder_projects(project_id)')
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    return (data as RawFolder[]).map(toFolder);
+  }
+
+  async createFolder(folder: TravelFolder): Promise<TravelFolder> {
+    const { data, error } = await this.client
+      .from('travel_folders')
+      .insert({ id: folder.id, name: folder.name, color_hex: folder.color_hex })
+      .select('*')
+      .single();
+    if (error) throw error;
+    return toFolder(data);
+  }
+
+  async updateFolder(folderId: string, name: string, colorHex: string): Promise<void> {
+    const { data, error } = await this.client
+      .from('travel_folders')
+      .update({ name, color_hex: colorHex })
+      .eq('id', folderId)
+      .select('id');
+    if (error) throw error;
+    if (data.length === 0) throw new Error('Project not found');
+  }
+
+  async deleteFolder(folderId: string): Promise<void> {
+    // Clear memberships first so this works whether or not the FK cascades.
+    const { error: unlinkError } = await this.client.from('folder_projects').delete().eq('folder_id', folderId);
+    if (unlinkError) throw unlinkError;
+    const { error } = await this.client.from('travel_folders').delete().eq('id', folderId);
+    if (error) throw error;
+  }
+
+  async assignProjectToFolder(projectId: string, folderId: string | null): Promise<void> {
+    const { error } = await this.client.rpc('assign_project_to_folder', {
+      p_project_id: projectId,
+      p_folder_id: folderId,
+    });
+    if (error) throw error;
+  }
+
+  async listPinsForProjects(projectIds: string[]): Promise<ProjectPin[]> {
+    if (projectIds.length === 0) return [];
+    const { data, error } = await this.client
+      .from('project_pins')
+      .select('*, place:places(*)')
+      .in('project_id', projectIds)
+      .order('day_date', { ascending: true, nullsFirst: false })
+      .order('sort_order', { ascending: true });
+    if (error) throw error;
+    return (data as RawPin[]).map(toPin).filter((pin): pin is ProjectPin => pin !== null);
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -747,6 +1012,7 @@ class LocalTripService implements TripService {
     this.write({
       projects: data.projects.filter((p) => p.id !== id),
       pins: data.pins.filter((pin) => pin.project_id !== id),
+      folders: (data.folders ?? []).map((f) => ({ ...f, project_ids: f.project_ids.filter((pid) => pid !== id) })),
     });
   }
 
@@ -816,6 +1082,76 @@ class LocalTripService implements TripService {
   async revokeInvitation(): Promise<void> {
     throw new Error(DEMO_SHARING_ERROR);
   }
+
+  async getShareLink(): Promise<ProjectShareLink | null> {
+    return null;
+  }
+
+  async enableShareLink(): Promise<ProjectShareLink> {
+    throw new Error(DEMO_SHARING_ERROR);
+  }
+
+  async regenerateShareLink(): Promise<ProjectShareLink> {
+    throw new Error(DEMO_SHARING_ERROR);
+  }
+
+  async revokeShareLink(): Promise<void> {
+    throw new Error(DEMO_SHARING_ERROR);
+  }
+
+  async getShareLinkPreview(): Promise<ShareLinkPreview> {
+    return { valid: false };
+  }
+
+  async acceptShareLink(): Promise<ShareLinkAcceptResult> {
+    throw new Error(DEMO_SHARING_ERROR);
+  }
+
+  async listFolders(): Promise<TravelFolder[]> {
+    await this.tick();
+    return [...(this.read().folders ?? [])].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+
+  async createFolder(folder: TravelFolder): Promise<TravelFolder> {
+    await this.tick();
+    const data = this.read();
+    this.write({ ...data, folders: [...(data.folders ?? []), folder] });
+    return folder;
+  }
+
+  async updateFolder(folderId: string, name: string, colorHex: string): Promise<void> {
+    await this.tick();
+    const data = this.read();
+    if (!(data.folders ?? []).some((f) => f.id === folderId)) throw new Error('Project not found');
+    this.write({
+      ...data,
+      folders: (data.folders ?? []).map((f) => (f.id === folderId ? { ...f, name, color_hex: colorHex } : f)),
+    });
+  }
+
+  async deleteFolder(folderId: string): Promise<void> {
+    await this.tick();
+    const data = this.read();
+    this.write({ ...data, folders: (data.folders ?? []).filter((f) => f.id !== folderId) });
+  }
+
+  async assignProjectToFolder(projectId: string, folderId: string | null): Promise<void> {
+    await this.tick();
+    const data = this.read();
+    this.write({
+      ...data,
+      folders: (data.folders ?? []).map((f) => {
+        const without = f.project_ids.filter((id) => id !== projectId);
+        return { ...f, project_ids: f.id === folderId ? [...without, projectId] : without };
+      }),
+    });
+  }
+
+  async listPinsForProjects(projectIds: string[]): Promise<ProjectPin[]> {
+    await this.tick();
+    const wanted = new Set(projectIds);
+    return this.read().pins.filter((pin) => wanted.has(pin.project_id));
+  }
 }
 
 function isSeedData(value: unknown): value is SeedData {
@@ -882,7 +1218,8 @@ export async function signUpWithEmail(
     email: email.trim(),
     password,
     options: {
-      emailRedirectTo: typeof window === 'undefined' ? undefined : window.location.origin,
+      // Back to the page they signed up on, so a /join/<token> invite survives email confirmation.
+      emailRedirectTo: typeof window === 'undefined' ? undefined : window.location.origin + window.location.pathname,
       data: name ? { display_name: name, full_name: name } : undefined,
     },
   });
@@ -937,6 +1274,63 @@ export function removeCollaborator(projectId: string, userId: string): Promise<v
 
 export function revokeInvitation(invitationId: string): Promise<void> {
   return getTripService().revokeInvitation(invitationId);
+}
+
+/* --------------------------------------------------------- share links --- */
+
+export async function getProjectShareLink(projectId: string): Promise<ProjectShareLink | null> {
+  return getTripService().getShareLink(projectId);
+}
+
+export function enableOrUpdateShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink> {
+  return getTripService().enableShareLink(projectId, role);
+}
+
+export function regenerateShareLink(projectId: string, role: InvitableRole): Promise<ProjectShareLink> {
+  return getTripService().regenerateShareLink(projectId, role);
+}
+
+export function revokeShareLink(projectId: string): Promise<void> {
+  return getTripService().revokeShareLink(projectId);
+}
+
+export function getShareLinkPreview(token: string): Promise<ShareLinkPreview> {
+  return getTripService().getShareLinkPreview(token);
+}
+
+export function acceptShareLink(token: string): Promise<ShareLinkAcceptResult> {
+  return getTripService().acceptShareLink(token);
+}
+
+export function shareLinkUrl(token: string): string {
+  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+  return `${origin}/join/${encodeURIComponent(token)}`;
+}
+
+/* ------------------------------------------------------------- folders --- */
+
+export function getTravelFolders(): Promise<TravelFolder[]> {
+  return getTripService().listFolders();
+}
+
+export function createTravelFolder(folder: TravelFolder): Promise<TravelFolder> {
+  return getTripService().createFolder(folder);
+}
+
+export function renameTravelFolder(folderId: string, name: string, colorHex: string): Promise<void> {
+  return getTripService().updateFolder(folderId, name, colorHex);
+}
+
+export function deleteTravelFolder(folderId: string): Promise<void> {
+  return getTripService().deleteFolder(folderId);
+}
+
+export function assignProjectToFolder(projectId: string, folderId: string | null): Promise<void> {
+  return getTripService().assignProjectToFolder(projectId, folderId);
+}
+
+export function getPinsForProjects(projectIds: string[]): Promise<ProjectPin[]> {
+  return getTripService().listPinsForProjects(projectIds);
 }
 
 export function resetDemoData(): void {

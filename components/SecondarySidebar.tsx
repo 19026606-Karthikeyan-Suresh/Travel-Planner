@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Crosshair,
   Eye,
+  Folder as FolderIcon,
   ListOrdered,
   Map as MapIcon,
   MapPin,
@@ -21,12 +22,13 @@ import {
 import { UNASSIGNED, type BucketKey, type Project, type ProjectPin, type TripDay } from '@/types/trip';
 import { MAX_TRIP_DAYS, sumCost, tripLength, UNASSIGNED_COLOR } from '@/lib/itinerary';
 import { useItinerary } from '@/hooks/useItinerary';
-import { selectCanEdit, useTripStore, type WorkspaceTab } from '@/store/useTripStore';
+import { folderOfProject, selectCanEdit, useTripStore, type WorkspaceTab } from '@/store/useTripStore';
 import { AddPlaceInput } from '@/components/workspace/AddPlaceInput';
 import { BudgetPanel } from '@/components/workspace/BudgetPanel';
 import { BucketDropZone, PinBoard } from '@/components/workspace/PinBoard';
 import { SidebarToggle } from '@/components/PrimarySidebar';
 import { CollaboratorsModal } from '@/components/CollaboratorsModal';
+import { FolderOverview } from '@/components/FolderOverview';
 import { AvatarStack } from '@/components/ui/Avatar';
 import { cn, formatCurrency, formatDateRange, parseISODate } from '@/lib/utils';
 
@@ -37,23 +39,41 @@ const drawerSpring = { type: 'spring', stiffness: 340, damping: 38, mass: 0.9 } 
 /*  Drawer shell                                                               */
 /* -------------------------------------------------------------------------- */
 
+type DrawerPanel = { kind: 'trip' | 'folder'; id: string };
+
 /**
  * From 768px up the drawer pushes the map aside. On phones it becomes a full-screen
- * sheet that trades places with the map via a floating toggle.
+ * sheet that trades places with the map via a floating toggle. It shows either a trip's
+ * workspace or, for a Project folder, the Project Overview.
  */
 export function SecondarySidebar() {
   const activeProjectId = useTripStore((s) => s.activeProjectId);
+  const activeFolderId = useTripStore((s) => s.activeFolderId);
   const mobile = useTripStore((s) => s.viewport === 'mobile');
   const mobilePanel = useTripStore((s) => s.mobilePanel);
-  // Keep rendering the last trip while the drawer animates closed.
-  const [shownId, setShownId] = useState<string | null>(activeProjectId);
-  if (activeProjectId !== null && activeProjectId !== shownId) setShownId(activeProjectId);
+  const target: DrawerPanel | null = activeProjectId
+    ? { kind: 'trip', id: activeProjectId }
+    : activeFolderId
+      ? { kind: 'folder', id: activeFolderId }
+      : null;
+  // Keep rendering the last panel while the drawer animates closed.
+  const [shown, setShown] = useState<DrawerPanel | null>(target);
+  if (target && (target.kind !== shown?.kind || target.id !== shown.id)) setShown(target);
+  const open = target !== null;
+
+  const panel = (fluid: boolean) =>
+    shown &&
+    (shown.kind === 'folder' ? (
+      <FolderOverview key={`folder:${shown.id}`} folderId={shown.id} width={fluid ? '100%' : DRAWER_WIDTH} />
+    ) : (
+      <Workspace key={`trip:${shown.id}`} projectId={shown.id} fluid={fluid} />
+    ));
 
   if (mobile) {
     return (
       <>
-        <AnimatePresence initial={false} onExitComplete={() => setShownId(null)}>
-          {activeProjectId && mobilePanel === 'workspace' && (
+        <AnimatePresence initial={false} onExitComplete={() => setShown(null)}>
+          {open && mobilePanel === 'workspace' && (
             <motion.aside
               key="workspace-sheet"
               initial={{ y: '100%' }}
@@ -61,20 +81,20 @@ export function SecondarySidebar() {
               exit={{ y: '100%' }}
               transition={drawerSpring}
               className="absolute inset-0 z-20 overflow-hidden bg-zinc-900"
-              aria-label="Trip workspace"
+              aria-label={shown?.kind === 'folder' ? 'Project overview' : 'Trip workspace'}
             >
-              {shownId && <Workspace projectId={shownId} fluid />}
+              {panel(true)}
             </motion.aside>
           )}
         </AnimatePresence>
-        {activeProjectId && <MobilePanelToggle />}
+        {open && <MobilePanelToggle panelLabel={target?.kind === 'folder' ? 'Overview' : 'Itinerary'} />}
       </>
     );
   }
 
   return (
-    <AnimatePresence initial={false} onExitComplete={() => setShownId(null)}>
-      {activeProjectId && (
+    <AnimatePresence initial={false} onExitComplete={() => setShown(null)}>
+      {open && (
         <motion.aside
           key="workspace"
           initial={{ width: 0 }}
@@ -82,16 +102,16 @@ export function SecondarySidebar() {
           exit={{ width: 0 }}
           transition={drawerSpring}
           className="relative z-20 h-full shrink-0 overflow-hidden border-r border-zinc-800 bg-zinc-900/95 backdrop-blur-md max-md:hidden"
-          aria-label="Trip workspace"
+          aria-label={shown?.kind === 'folder' ? 'Project overview' : 'Trip workspace'}
         >
-          {shownId && <Workspace projectId={shownId} />}
+          {panel(false)}
         </motion.aside>
       )}
     </AnimatePresence>
   );
 }
 
-function MobilePanelToggle() {
+function MobilePanelToggle({ panelLabel }: { panelLabel: string }) {
   const mobilePanel = useTripStore((s) => s.mobilePanel);
   const setMobilePanel = useTripStore((s) => s.setMobilePanel);
   const showingMap = mobilePanel === 'map';
@@ -103,7 +123,7 @@ function MobilePanelToggle() {
       className="fixed bottom-5 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-900 shadow-[0_10px_30px_-8px_rgba(0,0,0,0.7)] transition-transform active:scale-95"
     >
       {showingMap ? <ListOrdered className="size-4" /> : <MapIcon className="size-4" />}
-      {showingMap ? 'Itinerary' : 'Map'}
+      {showingMap ? panelLabel : 'Map'}
     </button>
   );
 }
@@ -158,7 +178,9 @@ function Workspace({ projectId, fluid = false }: { projectId: string; fluid?: bo
 
 function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins: ProjectPin[]; savedCount: number }) {
   const setActiveProject = useTripStore((s) => s.setActiveProject);
+  const setActiveFolder = useTripStore((s) => s.setActiveFolder);
   const canEdit = useTripStore(selectCanEdit);
+  const folder = useTripStore((s) => folderOfProject(s.folders, project.id));
   const total = sumCost(pins);
 
   return (
@@ -167,6 +189,20 @@ function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins
         <SidebarToggle className="mt-0.5" />
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-1.5 text-xs text-zinc-500">
+            {folder && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setActiveFolder(folder.id)}
+                  title={`Back to ${folder.name} overview`}
+                  className="-mx-1 flex shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+                >
+                  <FolderIcon className="size-3.5" style={{ color: folder.color_hex }} fill={`${folder.color_hex}33`} />
+                  <span className="max-w-[120px] truncate">{folder.name}</span>
+                </button>
+                <ChevronRight className="size-3 shrink-0 text-zinc-600" />
+              </>
+            )}
             <MapPin className="size-3.5 shrink-0" />
             <span className="truncate">{project.destination_name}</span>
             {!canEdit && (

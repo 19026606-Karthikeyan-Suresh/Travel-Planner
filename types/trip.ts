@@ -75,6 +75,54 @@ export interface ProjectCollaborators {
   invitations: ProjectInvitation[];
 }
 
+/** Row in `public.project_share_links`: at most one per trip; `is_active = false` when disabled. */
+export interface ProjectShareLink {
+  id: string;
+  project_id: string;
+  token: string;
+  role_code: InvitableRole;
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string;
+}
+
+/** What `rpc('get_share_link_preview')` tells a visitor (signed in or not) about a link. */
+export interface ShareLinkPreview {
+  valid: boolean;
+  project_id?: string;
+  title?: string;
+  destination_name?: string;
+  start_date?: ISODate;
+  end_date?: ISODate;
+  role_code?: InvitableRole;
+  owner_name?: string | null;
+}
+
+/** What `rpc('accept_share_link')` reports after joining. */
+export interface ShareLinkAcceptResult {
+  status: 'joined' | 'already_member';
+  project_id: string;
+  title: string;
+  role_code: CollaboratorRole;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Travel folders ("Projects" in the UI: a country or region of trips)        */
+/* -------------------------------------------------------------------------- */
+
+/** Row in `public.travel_folders`, plus its trips from `public.folder_projects`. */
+export interface TravelFolder {
+  id: string;
+  owner_id: string | null;
+  name: string;
+  color_hex: string;
+  created_at: string;
+  project_ids: string[];
+}
+
+export const FOLDER_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#38bdf8'] as const;
+export const DEFAULT_FOLDER_COLOR: string = FOLDER_COLORS[0];
+
 /* -------------------------------------------------------------------------- */
 /*  Projects                                                                   */
 /* -------------------------------------------------------------------------- */

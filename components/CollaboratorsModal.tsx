@@ -1,17 +1,21 @@
 'use client';
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Check,
   CircleAlert,
+  Copy,
   Crown,
   HardDrive,
+  Link2,
+  Link2Off,
   LoaderCircle,
   LogOut,
   Mail,
   MailPlus,
+  RefreshCw,
   UserCheck,
   UserMinus,
   Users,
@@ -27,8 +31,16 @@ import {
   type Project,
   type ProjectInvitation,
   type ProjectMember,
+  type ProjectShareLink,
 } from '@/types/trip';
-import { EMPTY_INVITATIONS, useTripStore } from '@/store/useTripStore';
+import { EMPTY_INVITATIONS, errorMessage, useTripStore } from '@/store/useTripStore';
+import {
+  enableOrUpdateShareLink,
+  getProjectShareLink,
+  regenerateShareLink,
+  revokeShareLink,
+  shareLinkUrl,
+} from '@/lib/supabaseClient';
 import { Avatar, personName } from '@/components/ui/Avatar';
 import { cn } from '@/lib/utils';
 
@@ -133,7 +145,10 @@ function SharePanel({ project, onClose }: { project: Project; onClose: () => voi
             </p>
           </div>
         ) : isOwner ? (
-          <InviteBar projectId={project.id} />
+          <>
+            <InviteBar projectId={project.id} />
+            <ShareLinkCard projectId={project.id} />
+          </>
         ) : (
           <div className="flex items-center gap-2.5 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3.5 py-2.5 text-[13px] text-zinc-400">
             <RoleBadge role={project.currentUserRole} />
@@ -338,6 +353,261 @@ function InviteBar({ projectId }: { projectId: string }) {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Shareable invite link                                                      */
+/* -------------------------------------------------------------------------- */
+
+type LinkAction = 'create' | 'role' | 'reset' | 'disable';
+
+/** Owner-only card: one URL anyone can use to join, with a role, reset and off switch. */
+function ShareLinkCard({ projectId }: { projectId: string }) {
+  const [link, setLink] = useState<ProjectShareLink | null>(null);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [createRole, setCreateRole] = useState<InvitableRole>('viewer');
+  const [busy, setBusy] = useState<LinkAction | null>(null);
+  const [armed, setArmed] = useState<'reset' | 'disable' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const urlRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getProjectShareLink(projectId)
+      .then((found) => {
+        if (cancelled) return;
+        setLink(found);
+        if (found) setCreateRole(found.role_code);
+        setStatus('ready');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(errorMessage(err));
+        setStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+
+  const active = link?.is_active ? link : null;
+  const url = active ? shareLinkUrl(active.token) : '';
+
+  const run = async (action: LinkAction, task: () => Promise<ProjectShareLink | null>) => {
+    setBusy(action);
+    setError(null);
+    setArmed(null);
+    try {
+      const next = await task();
+      setLink(next);
+      if (next) setCreateRole(next.role_code);
+      setStatus('ready');
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      // Clipboard API blocked (insecure origin / permissions): fall back to a selection copy.
+      urlRef.current?.select();
+      document.execCommand('copy');
+    }
+    setCopied(true);
+  };
+
+  return (
+    <section className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3.5">
+      <div className="flex items-start gap-3">
+        <span
+          className={cn(
+            'grid size-8 shrink-0 place-items-center rounded-lg ring-1',
+            active ? 'bg-indigo-500/15 text-indigo-300 ring-indigo-500/25' : 'bg-zinc-800/80 text-zinc-500 ring-zinc-700/60',
+          )}
+        >
+          <Link2 className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+            Invite link
+            {active && (
+              <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-px text-[10px] font-medium text-emerald-300">
+                On
+              </span>
+            )}
+          </p>
+          <p className="text-xs text-zinc-500">
+            {active ? 'Anyone with this link can join the trip.' : 'Share one link in a group chat instead of inviting each email.'}
+          </p>
+        </div>
+        {active && (
+          <div className="-mr-1 flex shrink-0 items-center gap-0.5">
+            <LinkIconButton
+              label={armed === 'reset' ? 'Click again to reset — the current link stops working' : 'Reset link (the current link stops working)'}
+              armed={armed === 'reset'}
+              busy={busy === 'reset'}
+              onClick={() =>
+                armed === 'reset'
+                  ? void run('reset', () => regenerateShareLink(projectId, active.role_code))
+                  : setArmed('reset')
+              }
+            >
+              <RefreshCw className="size-3.5" />
+            </LinkIconButton>
+            <LinkIconButton
+              label={armed === 'disable' ? 'Click again to turn the link off' : 'Disable link'}
+              armed={armed === 'disable'}
+              busy={busy === 'disable'}
+              danger
+              onClick={() =>
+                armed === 'disable'
+                  ? void run('disable', async () => {
+                      await revokeShareLink(projectId);
+                      return { ...active, is_active: false };
+                    })
+                  : setArmed('disable')
+              }
+            >
+              <Link2Off className="size-3.5" />
+            </LinkIconButton>
+          </div>
+        )}
+      </div>
+
+      {status === 'loading' ? (
+        <div className="mt-3 h-9 animate-pulse rounded-lg bg-zinc-800/60" aria-hidden />
+      ) : active ? (
+        <div className="mt-3 space-y-2.5">
+          <div className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/80 py-1 pr-1 pl-3 focus-within:border-indigo-500/50">
+            <input
+              ref={urlRef}
+              readOnly
+              value={url}
+              onFocus={(e) => e.currentTarget.select()}
+              aria-label="Invite link"
+              className="min-w-0 flex-1 bg-transparent font-mono text-xs text-zinc-300 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => void copy()}
+              className={cn(
+                'flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors',
+                copied ? 'bg-emerald-500/15 text-emerald-300' : 'bg-indigo-600 text-white hover:bg-indigo-500',
+              )}
+            >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              {copied ? 'Copied!' : 'Copy link'}
+            </button>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-zinc-400">
+            Anyone with the link joins as
+            <select
+              value={active.role_code}
+              disabled={busy !== null}
+              onChange={(e) => {
+                const role = INVITABLE_ROLES.find((r) => r === e.target.value);
+                if (role && role !== active.role_code) void run('role', () => enableOrUpdateShareLink(projectId, role));
+              }}
+              className="rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-200 focus:border-indigo-500/70 focus:outline-none disabled:opacity-60"
+            >
+              {INVITABLE_ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {ROLE_LABELS[r]}
+                </option>
+              ))}
+            </select>
+            {busy === 'role' && <LoaderCircle className="size-3.5 animate-spin text-zinc-500" />}
+          </label>
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <select
+            value={createRole}
+            onChange={(e) => setCreateRole(INVITABLE_ROLES.find((r) => r === e.target.value) ?? 'viewer')}
+            aria-label="Role for people who join with the link"
+            className="rounded-lg border border-zinc-800 bg-zinc-950/60 px-2.5 py-2 text-sm text-zinc-200 focus:border-indigo-500/70 focus:outline-none sm:w-[118px]"
+          >
+            {INVITABLE_ROLES.map((r) => (
+              <option key={r} value={r}>
+                {ROLE_LABELS[r]}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            disabled={busy !== null || status === 'error'}
+            onClick={() => void run('create', () => enableOrUpdateShareLink(projectId, createRole))}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-sm font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:opacity-50"
+          >
+            {busy === 'create' ? <LoaderCircle className="size-4 animate-spin" /> : <Link2 className="size-4" />}
+            {link ? 'Turn invite link back on' : 'Create invite link'}
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <p role="alert" className="mt-2.5 flex items-start gap-1.5 text-xs text-rose-300">
+          <CircleAlert className="mt-px size-3.5 shrink-0 text-rose-400" />
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function LinkIconButton({
+  label,
+  armed,
+  busy,
+  danger = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  armed: boolean;
+  busy: boolean;
+  danger?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      disabled={busy}
+      onClick={onClick}
+      className={cn(
+        'grid size-7 place-items-center rounded-lg transition-colors disabled:opacity-60',
+        armed
+          ? danger
+            ? 'bg-rose-500/15 text-rose-300'
+            : 'bg-amber-500/15 text-amber-300'
+          : danger
+            ? 'text-zinc-500 hover:bg-rose-500/15 hover:text-rose-300'
+            : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100',
+      )}
+    >
+      {busy ? <LoaderCircle className="size-3.5 animate-spin" /> : armed ? <Check className="size-3.5" /> : children}
+    </button>
   );
 }
 

@@ -16,10 +16,18 @@ import { LngLatBounds } from 'maplibre-gl';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Bookmark, Eye, Layers, LoaderCircle, MousePointerClick, Plus, Scan, X } from 'lucide-react';
 import { PIN_CATEGORIES, UNASSIGNED, type BucketKey, type DayFilter, type PinCategory, type Project, type ProjectPin, type TripDay } from '@/types/trip';
-import { CATEGORY_LABELS, matchesFilter, UNASSIGNED_COLOR, type PinDisplayMeta } from '@/lib/itinerary';
+import { CATEGORY_LABELS, matchesFilter, tripColorMap, UNASSIGNED_COLOR, type PinDisplayMeta } from '@/lib/itinerary';
 import { reverseGeocode } from '@/lib/geocode';
 import { useItinerary } from '@/hooks/useItinerary';
-import { selectCanEdit, useTripStore, type CameraCommand, type DraftPin } from '@/store/useTripStore';
+import {
+  folderTrips,
+  selectActiveFolder,
+  selectCanEdit,
+  useTripStore,
+  type CameraCommand,
+  type DraftPin,
+} from '@/store/useTripStore';
+import type { TravelFolder } from '@/types/trip';
 import { CategoryIcon } from '@/components/ui/CategoryIcon';
 import { SidebarToggle } from '@/components/PrimarySidebar';
 import { cn } from '@/lib/utils';
@@ -84,6 +92,19 @@ export default function MapCanvas() {
 
   const { project, pins, days, meta } = useItinerary(activeProjectId);
 
+  // Project Overview: every trip in the folder at once, one colour per trip.
+  const activeFolder = useTripStore(selectActiveFolder);
+  const folderPins = useTripStore((s) => s.folderPins);
+  const folderPinsStatus = useTripStore((s) => s.folderPinsStatus);
+  const overview = !project ? activeFolder : undefined;
+  const overviewTrips = useMemo(() => (overview ? folderTrips(overview, projects) : []), [overview, projects]);
+  const tripColors = useMemo(() => tripColorMap(overviewTrips.map((t) => t.id)), [overviewTrips]);
+  const tripTitles = useMemo(() => new globalThis.Map(overviewTrips.map((t) => [t.id, t.title])), [overviewTrips]);
+  const overviewPins = useMemo(
+    () => (overview ? folderPins.filter((pin) => tripColors.has(pin.project_id)) : []),
+    [overview, folderPins, tripColors],
+  );
+
   const visible = useMemo<VisiblePin[]>(() => {
     const list: VisiblePin[] = [];
     for (const pin of pins) {
@@ -134,7 +155,11 @@ export default function MapCanvas() {
     if (!map) return;
     const points: [number, number][] = project
       ? visible.map(({ pin }) => [pin.lng, pin.lat])
-      : projects.map((p) => [p.center_lng, p.center_lat]);
+      : overview
+        ? overviewPins.length > 0
+          ? overviewPins.map((pin) => [pin.lng, pin.lat])
+          : overviewTrips.map((t) => [t.center_lng, t.center_lat])
+        : projects.map((p) => [p.center_lng, p.center_lat]);
 
     if (points.length === 0) {
       if (project) map.flyTo({ center: [project.center_lng, project.center_lat], zoom: 11.5, duration: 1100, essential: true });
@@ -143,18 +168,19 @@ export default function MapCanvas() {
     }
     const [first] = points;
     if (points.length === 1 && first) {
-      map.flyTo({ center: first, zoom: project ? 14 : 4, duration: 1100, essential: true });
+      map.flyTo({ center: first, zoom: project ? 14 : overview ? 11 : 4, duration: 1100, essential: true });
       return;
     }
     const bounds = points.reduce((b, point) => b.extend(point), new LngLatBounds(points[0], points[0]));
     const compact = (containerRef.current?.clientWidth ?? 1024) < 640;
     map.fitBounds(bounds, {
       padding: compact ? FIT_PADDING_COMPACT : FIT_PADDING,
-      maxZoom: project ? 14.5 : 5,
+      // An overview frames a whole country/region, so it may zoom in further than the world view.
+      maxZoom: project ? 14.5 : overview ? 12 : 5,
       duration: 1200,
       essential: true,
     });
-  }, [project, projects, visible]);
+  }, [project, projects, visible, overview, overviewPins, overviewTrips]);
 
   const fitRef = useRef(fitNow);
   useEffect(() => {
@@ -267,20 +293,32 @@ export default function MapCanvas() {
 
         {project && visible.map(({ pin, meta: m }) => <PinMarker key={pin.id} pin={pin} meta={m} />)}
 
+        {overview &&
+          overviewPins.map((pin) => (
+            <FolderPinMarker
+              key={pin.id}
+              pin={pin}
+              color={tripColors.get(pin.project_id) ?? overview.color_hex}
+              tripTitle={tripTitles.get(pin.project_id) ?? ''}
+            />
+          ))}
+
         {!project &&
+          !overview &&
           projects.map((p) => <ProjectMarker key={p.id} project={p} onOpen={() => setActiveProject(p.id)} />)}
 
         {project && canEdit && draftPin && <DropPinPopup key={`${draftPin.lat},${draftPin.lng}`} draft={draftPin} days={days} filter={dayFilter} />}
       </Map>
 
       {/* When a workspace drawer is docked, its header carries the toggle instead. */}
-      {(!project || mobile) && <SidebarToggle className="absolute top-4 left-4 z-10" />}
+      {((!project && !overview) || mobile) && <SidebarToggle className="absolute top-4 left-4 z-10" />}
 
       <AnimatePresence>
         {project && <DayFilterPanel key="filters" days={days} savedCount={pins.filter((p) => meta.get(p.id)?.bucket === UNASSIGNED).length} />}
+        {overview && <FolderLegend key={`legend:${overview.id}`} folder={overview} trips={overviewTrips} colors={tripColors} />}
       </AnimatePresence>
 
-      {project && pinsStatus === 'loading' && (
+      {((project && pinsStatus === 'loading') || (overview && folderPinsStatus === 'loading')) && (
         <div className="pointer-events-none absolute top-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-3 py-1.5 text-xs text-zinc-300 backdrop-blur-md">
           <LoaderCircle className="size-3.5 animate-spin" /> Loading places…
         </div>
@@ -299,6 +337,11 @@ export default function MapCanvas() {
               View only · click a marker to see its details
             </>
           )}
+        </div>
+      ) : overview ? (
+        <div className="pointer-events-none absolute bottom-4 left-4 z-10 hidden items-center gap-2 rounded-xl sm:flex border border-zinc-700/60 bg-zinc-900/80 px-3 py-2 text-xs text-zinc-400 backdrop-blur-md">
+          <MousePointerClick className="size-3.5" style={{ color: overview.color_hex }} />
+          {overview.name} overview · click a pin to open its trip
         </div>
       ) : (
         <div className="pointer-events-none absolute top-16 left-1/2 z-10 -translate-x-1/2 rounded-xl border whitespace-nowrap sm:top-5 border-zinc-700/60 bg-zinc-900/80 px-4 py-2.5 text-center backdrop-blur-md">
@@ -376,6 +419,113 @@ const PinMarker = memo(function PinMarker({ pin, meta }: { pin: ProjectPin; meta
     </Marker>
   );
 });
+
+/** Overview pin: a small dot in its trip's colour; clicking opens that trip at this place. */
+const FolderPinMarker = memo(function FolderPinMarker({
+  pin,
+  color,
+  tripTitle,
+}: {
+  pin: ProjectPin;
+  color: string;
+  tripTitle: string;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const setActiveProject = useTripStore((s) => s.setActiveProject);
+  const selectPin = useTripStore((s) => s.selectPin);
+
+  return (
+    <Marker
+      longitude={pin.lng}
+      latitude={pin.lat}
+      anchor="center"
+      style={{ zIndex: hovered ? 30 : 1 }}
+      onClick={(e) => {
+        e.originalEvent.stopPropagation();
+        setActiveProject(pin.project_id);
+        selectPin(pin.id, { fly: true, reveal: true });
+      }}
+    >
+      <div className="relative" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
+        <div
+          role="button"
+          aria-label={`${pin.name}, ${tripTitle}`}
+          className={cn(
+            'size-3.5 cursor-pointer rounded-full border-2 border-zinc-950 transition-transform duration-150',
+            hovered && 'scale-150',
+          )}
+          style={{ backgroundColor: color, boxShadow: `0 0 10px ${color}aa, 0 2px 8px rgba(0,0,0,0.5)` }}
+        />
+        <AnimatePresence>
+          {hovered && (
+            <motion.div
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 4 }}
+              transition={{ duration: 0.12 }}
+              className="pointer-events-none absolute bottom-full left-1/2 mb-2.5 -translate-x-1/2 rounded-lg border border-zinc-700/70 bg-zinc-900/95 px-2.5 py-1.5 whitespace-nowrap shadow-xl backdrop-blur-md"
+            >
+              <p className="text-xs font-medium text-zinc-100">{pin.name}</p>
+              <p className="flex items-center gap-1 text-[10.5px] text-zinc-400">
+                <CategoryIcon category={pin.category} className="size-3" />
+                {CATEGORY_LABELS[pin.category]}
+                <span style={{ color }}>· {tripTitle}</span>
+              </p>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </Marker>
+  );
+});
+
+function FolderLegend({ folder, trips, colors }: { folder: TravelFolder; trips: Project[]; colors: Map<string, string> }) {
+  const setActiveProject = useTripStore((s) => s.setActiveProject);
+  const requestFit = useTripStore((s) => s.requestFit);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      transition={{ duration: 0.18 }}
+      className="absolute top-4 right-4 z-10 flex max-w-[min(300px,calc(100%-76px))] items-start gap-2"
+    >
+      <div className="min-w-0 rounded-xl border border-zinc-700/60 bg-zinc-900/80 p-1.5 shadow-[0_10px_30px_-12px_rgba(0,0,0,0.6)] backdrop-blur-md">
+        <p className="flex items-center gap-1.5 px-1.5 pt-0.5 pb-1.5 text-[11px] font-medium text-zinc-400">
+          <Layers className="size-3.5" style={{ color: folder.color_hex }} />
+          <span className="truncate">{folder.name}</span>
+          <span className="text-zinc-600">·</span>
+          {trips.length} trip{trips.length === 1 ? '' : 's'}
+        </p>
+        <div className="scrollbar-thin flex max-h-[40vh] flex-col gap-0.5 overflow-y-auto">
+          {trips.map((trip) => (
+            <button
+              key={trip.id}
+              type="button"
+              onClick={() => setActiveProject(trip.id)}
+              title={`Open ${trip.title}`}
+              className="flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left text-xs text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-50"
+            >
+              <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: colors.get(trip.id) }} />
+              <span className="truncate">{trip.title}</span>
+            </button>
+          ))}
+          {trips.length === 0 && <p className="px-2 py-1 text-xs text-zinc-500">No trips yet</p>}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={requestFit}
+        title="Fit map to all trips"
+        aria-label="Fit map to all trips"
+        className="grid size-[38px] shrink-0 place-items-center rounded-xl border border-zinc-700/60 bg-zinc-900/80 text-zinc-300 shadow-[0_10px_30px_-12px_rgba(0,0,0,0.6)] backdrop-blur-md transition-colors hover:bg-zinc-800 hover:text-zinc-50"
+      >
+        <Scan className="size-4" />
+      </button>
+    </motion.div>
+  );
+}
 
 function ProjectMarker({ project, onOpen }: { project: Project; onOpen: () => void }) {
   return (
