@@ -26,8 +26,13 @@ import {
 import { getTripService, onAuthChange, signOutUser, sortMembers, type DataMode } from '@/lib/supabaseClient';
 import { bucketOf, getTripDays } from '@/lib/itinerary';
 import { newId } from '@/lib/utils';
+import type { Cafe } from '@/lib/cafes/types';
 
-export type WorkspaceTab = 'itinerary' | 'saved' | 'budget';
+/** `cafes` only appears for trips in Singapore. */
+export type WorkspaceTab = 'itinerary' | 'saved' | 'budget' | 'cafes';
+
+/** A scraped café drawn on the map (see components/workspace/CafesPanel). */
+export type CafeMarker = Pick<Cafe, 'id' | 'name' | 'priceTier' | 'types' | 'charging'> & { lat: number; lng: number };
 /** mobile < 768 ≤ tablet < 1024 ≤ desktop < 1280 ≤ wide */
 export type Viewport = 'mobile' | 'tablet' | 'desktop' | 'wide';
 export type MobilePanel = 'workspace' | 'map';
@@ -97,6 +102,10 @@ interface TripState {
   dayFilter: DayFilter;
   collapsedBuckets: Record<string, boolean>;
   draftPin: DraftPin | null;
+  /** Cafés the Cafés tab is listing (after its filters), drawn on the map while the tab is open. */
+  cafeMarkers: CafeMarker[];
+  /** Café highlighted on the map and in the list. */
+  focusedCafeId: string | null;
   cameraCommand: CameraCommand | null;
   /** Last settled map center; biases place search and positions custom places. */
   mapCenter: { lat: number; lng: number } | null;
@@ -150,6 +159,9 @@ interface TripState {
   setActiveTab: (tab: WorkspaceTab) => void;
   setHoveredPin: (id: string | null) => void;
   selectPin: (id: string | null, options?: { fly?: boolean; reveal?: boolean }) => void;
+  setCafeMarkers: (cafes: CafeMarker[]) => void;
+  /** Highlights a café; with `fly`, moves the map to it (and shows the map on phones). */
+  focusCafe: (cafe: Pick<CafeMarker, 'id' | 'lat' | 'lng'> | null, options?: { fly?: boolean }) => void;
   setDayFilter: (filter: DayFilter) => void;
   toggleBucket: (bucket: BucketKey, collapsed?: boolean) => void;
   setDraftPin: (draft: DraftPin | null) => void;
@@ -220,6 +232,8 @@ const SIGNED_OUT_DATA = {
   dayFilter: 'all',
   collapsedBuckets: {},
   draftPin: null,
+  cafeMarkers: [],
+  focusedCafeId: null,
   mobilePanel: 'workspace',
 } satisfies Partial<TripState>;
 
@@ -487,6 +501,8 @@ export const useTripStore = create<TripState>()((set, get) => {
         selectedPinId: null,
         dayFilter: 'all',
         draftPin: null,
+        cafeMarkers: [],
+        focusedCafeId: null,
         mobilePanel: 'workspace',
       });
       if (id === null) {
@@ -1009,6 +1025,7 @@ export const useTripStore = create<TripState>()((set, get) => {
       const { dayFilter } = get();
       set((s) => ({
         selectedPinId: id,
+        focusedCafeId: null,
         // Never fly to a marker the day filter is hiding.
         dayFilter: dayFilter === 'all' || dayFilter === bucket ? dayFilter : 'all',
         ...(options.reveal
@@ -1021,6 +1038,27 @@ export const useTripStore = create<TripState>()((set, get) => {
       if (options.fly) {
         camera({ kind: 'fly', lng: pin.lng, lat: pin.lat, zoom: FOCUS_ZOOM });
         // On phones the sheet covers the map; reveal it so the fly-to is visible.
+        if (get().viewport === 'mobile') set({ mobilePanel: 'map' });
+      }
+    },
+
+    setCafeMarkers: (cafes) => {
+      const { focusedCafeId } = get();
+      set({
+        cafeMarkers: cafes,
+        // A café filtered out of the list shouldn't stay highlighted on the map.
+        focusedCafeId: focusedCafeId && cafes.some((c) => c.id === focusedCafeId) ? focusedCafeId : null,
+      });
+    },
+
+    focusCafe: (cafe, options = {}) => {
+      if (!cafe) {
+        set({ focusedCafeId: null });
+        return;
+      }
+      set({ focusedCafeId: cafe.id, selectedPinId: null, draftPin: null });
+      if (options.fly) {
+        camera({ kind: 'fly', lng: cafe.lng, lat: cafe.lat, zoom: FOCUS_ZOOM });
         if (get().viewport === 'mobile') set({ mobilePanel: 'map' });
       }
     },

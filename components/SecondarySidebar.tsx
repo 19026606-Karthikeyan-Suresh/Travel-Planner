@@ -25,6 +25,8 @@ import { useItinerary } from '@/hooks/useItinerary';
 import { folderOfProject, selectCanEdit, useTripStore, type WorkspaceTab } from '@/store/useTripStore';
 import { AddPlaceInput } from '@/components/workspace/AddPlaceInput';
 import { BudgetPanel } from '@/components/workspace/BudgetPanel';
+import { CafesPanel } from '@/components/workspace/CafesPanel';
+import { isInSingapore } from '@/lib/cafes/types';
 import { BucketDropZone, PinBoard } from '@/components/workspace/PinBoard';
 import { SidebarToggle } from '@/components/PrimarySidebar';
 import { CollaboratorsModal } from '@/components/CollaboratorsModal';
@@ -164,6 +166,7 @@ function Workspace({ projectId, fluid = false }: { projectId: string; fluid?: bo
                 <SavedPanel project={project} days={days} buckets={buckets} pinsById={pinsById} />
               )}
               {activeTab === 'budget' && <BudgetPanel pins={pins} days={days} buckets={buckets} />}
+              {activeTab === 'cafes' && hasCafes(project) && <CafesPanel project={project} pins={pins} />}
             </motion.div>
           </AnimatePresence>
         )}
@@ -239,7 +242,7 @@ function WorkspaceHeader({ project, pins, savedCount }: { project: Project; pins
         <ShareButton project={project} />
       </div>
 
-      <WorkspaceTabs savedCount={savedCount} />
+      <WorkspaceTabs savedCount={savedCount} showCafes={hasCafes(project)} />
     </header>
   );
 }
@@ -455,15 +458,26 @@ const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'itinerary', label: 'Itinerary' },
   { id: 'saved', label: 'Saved Places' },
   { id: 'budget', label: 'Budget' },
+  { id: 'cafes', label: 'Cafés' },
 ];
 
-function WorkspaceTabs({ savedCount }: { savedCount: number }) {
+/** The café guides are Singapore-only, so the tab shows for trips centred there. */
+function hasCafes(project: Project): boolean {
+  return isInSingapore(project.center_lat, project.center_lng);
+}
+
+function WorkspaceTabs({ savedCount, showCafes }: { savedCount: number; showCafes: boolean }) {
   const activeTab = useTripStore((s) => s.activeTab);
   const setActiveTab = useTripStore((s) => s.setActiveTab);
+  const tabs = showCafes ? TABS : TABS.filter((tab) => tab.id !== 'cafes');
 
   return (
-    <div role="tablist" aria-label="Workspace sections" className="my-3 grid grid-cols-3 rounded-xl bg-zinc-950/70 p-1">
-      {TABS.map((tab) => {
+    <div
+      role="tablist"
+      aria-label="Workspace sections"
+      className={cn('my-3 grid rounded-xl bg-zinc-950/70 p-1', showCafes ? 'grid-cols-4' : 'grid-cols-3')}
+    >
+      {tabs.map((tab) => {
         const active = tab.id === activeTab;
         return (
           <button
@@ -485,7 +499,8 @@ function WorkspaceTabs({ savedCount }: { savedCount: number }) {
               />
             )}
             <span className="relative flex items-center justify-center gap-1.5">
-              {tab.label}
+              {/* Four tabs don't fit "Saved Places" on one line. */}
+              {showCafes && tab.id === 'saved' ? 'Saved' : tab.label}
               {tab.id === 'saved' && savedCount > 0 && (
                 <span className="rounded-full bg-zinc-700/80 px-1.5 text-[10px] text-zinc-300 tabular-nums">{savedCount}</span>
               )}
