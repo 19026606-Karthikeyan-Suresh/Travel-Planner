@@ -437,8 +437,15 @@ export const useTripStore = create<TripState>()((set, get) => {
       if (get().foldersStatus !== 'loading') void get().loadFolders();
       try {
         let projects = await service.listProjects(user);
-        // First sign-in on a fresh schema: adopt the legacy (pre-auth) trips.
-        if (projects.length === 0 && user && service.mode === 'supabase' && !claimAttempted.has(user.id)) {
+        // First sign-in on a fresh schema: adopt the legacy (pre-auth) trips. Never for guests,
+        // who only ever see the trip they joined with a room code.
+        if (
+          projects.length === 0 &&
+          user &&
+          !user.is_anonymous &&
+          service.mode === 'supabase' &&
+          !claimAttempted.has(user.id)
+        ) {
           claimAttempted.add(user.id);
           try {
             await service.claimUnownedProjects();

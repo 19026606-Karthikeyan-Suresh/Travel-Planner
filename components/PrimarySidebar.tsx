@@ -295,29 +295,58 @@ function UserBadge() {
   const user = useTripStore((s) => s.user);
   const signOut = useTripStore((s) => s.signOut);
   const [signingOut, setSigningOut] = useState(false);
+  /** Guests confirm sign-out: an anonymous session can't be signed back into. */
+  const [armed, setArmed] = useState(false);
+
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+
   if (!user) return null;
   const name = personName(user);
+  const guest = Boolean(user.is_anonymous);
+  const signOutLabel = guest
+    ? armed
+      ? 'Click again to sign out. Guests can’t sign back in, so you’ll lose access to trips you joined.'
+      : 'Sign out (guest)'
+    : 'Sign out';
 
   return (
     <div className="group/user flex items-center gap-2.5 rounded-lg px-1.5 py-1">
       <Avatar person={user} size="md" className="ring-2 ring-zinc-800" />
       <div className="min-w-0 flex-1 leading-tight">
         <p className="truncate text-xs font-medium text-zinc-200">{name}</p>
-        <p className="truncate text-[11px] text-zinc-500" title={user.email}>
-          {user.email}
-        </p>
+        {guest ? (
+          <p className={cn('truncate text-[11px]', armed ? 'text-rose-300' : 'text-zinc-500')} title="Joined with a room code, no account">
+            {armed ? 'Can’t sign back in as this guest' : 'Guest'}
+          </p>
+        ) : (
+          <p className="truncate text-[11px] text-zinc-500" title={user.email}>
+            {user.email}
+          </p>
+        )}
       </div>
       <button
         type="button"
         disabled={signingOut}
         onClick={async () => {
+          if (guest && !armed) {
+            setArmed(true);
+            return;
+          }
+          setArmed(false);
           setSigningOut(true);
           await signOut();
           setSigningOut(false);
         }}
-        title="Sign out"
-        aria-label="Sign out"
-        className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-rose-300 disabled:opacity-60"
+        title={signOutLabel}
+        aria-label={signOutLabel}
+        className={cn(
+          'rounded-md p-1.5 transition-colors disabled:opacity-60',
+          armed ? 'bg-rose-500/15 text-rose-300' : 'text-zinc-500 hover:bg-zinc-800 hover:text-rose-300',
+        )}
       >
         {signingOut ? <LoaderCircle className="size-3.5 animate-spin" /> : <LogOut className="size-3.5" />}
       </button>
