@@ -27,6 +27,7 @@ import {
 import { buildSeedData, type SeedData } from '@/lib/seed';
 import { formatRoomCode, normalizeRoomCode, randomRoomCode } from '@/lib/roomCode';
 import { newId } from '@/lib/utils';
+import { authCallbackUrl } from '@/lib/siteUrl';
 
 /* -------------------------------------------------------------------------- */
 /*  Database typing (5NF schema)                                               */
@@ -973,7 +974,6 @@ const DEMO_STORAGE_KEY = 'wayfarer:demo:v2';
 const DEMO_LATENCY_MS = 160;
 const DEMO_SHARING_ERROR = 'Sharing needs a Supabase connection — this is demo mode.';
 const DEMO_LINKS_KEY = 'wayfarer:demo:share-links:v1';
-const DEMO_GUEST_KEY = 'wayfarer:demo:guest-name';
 
 function newDemoLink(projectId: string, role: InvitableRole): ProjectShareLink {
   return {
@@ -1129,7 +1129,7 @@ class LocalTripService implements TripService {
   }
 
   /*
-   * Demo share links live in their own localStorage key, so the join → lobby flow can be
+   * Demo share links live in their own localStorage key, so the join flow can be
    * clicked through without Supabase. They only work in this browser, and joining always
    * reports `already_member` because the demo user owns every trip.
    */
@@ -1316,77 +1316,28 @@ export async function signInWithEmail(email: string, password: string): Promise<
   if (error) throw error;
 }
 
-/** Resolves `needsConfirmation: true` when the project requires email confirmation first. */
+/**
+ * Resolves `needsConfirmation: true` when the project requires email confirmation first.
+ * The confirmation link lands on /auth/callback on *this* deployment, then continues to
+ * `next` (e.g. `/join/K7QM-2XPA`) so an invite survives the email round-trip.
+ */
 export async function signUpWithEmail(
   email: string,
   password: string,
   displayName?: string,
+  next = '/',
 ): Promise<{ needsConfirmation: boolean }> {
   const name = displayName?.trim();
   const { data, error } = await requireClient().auth.signUp({
     email: email.trim(),
     password,
     options: {
-      // Back to the page they signed up on, so a /join/<token> invite survives email confirmation.
-      emailRedirectTo: typeof window === 'undefined' ? undefined : window.location.origin + window.location.pathname,
+      emailRedirectTo: authCallbackUrl(next),
       data: name ? { display_name: name, full_name: name } : undefined,
     },
   });
   if (error) throw error;
   return { needsConfirmation: data.session === null };
-}
-
-export const GUEST_NAME_MAX = 40;
-
-function demoGuestProfile(name: string): UserProfile {
-  return { id: 'demo-guest', email: '', display_name: name, avatar_url: null, is_anonymous: true };
-}
-
-/** Demo mode only: the display name entered on the guest join screen in this browser. */
-export function getDemoGuest(): UserProfile | null {
-  try {
-    const name = window.localStorage.getItem(DEMO_GUEST_KEY)?.trim();
-    return name ? demoGuestProfile(name) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Guest join: an anonymous Supabase user whose only identity is a display name (needs
- * "Allow anonymous sign-ins" in the Supabase Auth settings). In demo mode the name is just
- * remembered in this browser.
- */
-export async function signInAsGuest(displayName: string): Promise<UserProfile> {
-  const name = displayName.trim().slice(0, GUEST_NAME_MAX);
-  if (!name) throw new Error('Enter a display name');
-
-  const client = getSupabaseClient();
-  if (!client) {
-    try {
-      window.localStorage.setItem(DEMO_GUEST_KEY, name);
-    } catch {
-      // Storage blocked: the name still applies for this visit.
-    }
-    return demoGuestProfile(name);
-  }
-
-  const { data, error } = await client.auth.signInAnonymously({
-    options: { data: { display_name: name, full_name: name } },
-  });
-  if (error) {
-    if (/anonymous sign-ins are disabled/i.test(error.message)) {
-      throw new Error('Guest joining isn’t switched on for this server yet. Sign in with an account instead.');
-    }
-    throw error;
-  }
-  if (!data.user) throw new Error('Guest sign-in returned no user');
-
-  // The new-user trigger usually copies display_name from the metadata; make sure the profile has it.
-  const { error: profileError } = await client.from('profiles').update({ display_name: name }).eq('id', data.user.id);
-  if (profileError) console.warn('[guest profile]', profileError.message);
-
-  return profileFromAuthUser(data.user);
 }
 
 export async function signOutUser(): Promise<void> {

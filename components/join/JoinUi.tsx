@@ -6,7 +6,7 @@ import { CalendarDays, Compass, LoaderCircle, MapPin } from 'lucide-react';
 import { MapBackdrop } from '@/components/AuthScreen';
 import { cn, formatDateRangeLong } from '@/lib/utils';
 
-/** Full-screen dark-map stage shared by /join, /join/<code> and the lobby. */
+/** Full-screen dark-map stage shared by /join, /join/<code> and /auth/callback. */
 export function JoinShell({ children }: { children: ReactNode }) {
   return (
     <main className="relative flex min-h-dvh w-screen items-center justify-center overflow-hidden bg-[#0e0e10] px-4 py-10 text-zinc-100">

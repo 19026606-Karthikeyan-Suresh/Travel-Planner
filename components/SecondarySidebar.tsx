@@ -1,15 +1,17 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useDragControls } from 'framer-motion';
 import {
   Bookmark,
   CalendarDays,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Crosshair,
   Eye,
   Folder as FolderIcon,
+  FolderOpen,
   ListOrdered,
   Map as MapIcon,
   MapPin,
@@ -22,7 +24,14 @@ import {
 import { UNASSIGNED, type BucketKey, type Project, type ProjectPin, type TripDay } from '@/types/trip';
 import { MAX_TRIP_DAYS, sumCost, tripLength, UNASSIGNED_COLOR } from '@/lib/itinerary';
 import { useItinerary } from '@/hooks/useItinerary';
-import { folderOfProject, selectCanEdit, useTripStore, type WorkspaceTab } from '@/store/useTripStore';
+import {
+  folderOfProject,
+  folderTrips,
+  selectActiveFolder,
+  selectCanEdit,
+  useTripStore,
+  type WorkspaceTab,
+} from '@/store/useTripStore';
 import { AddPlaceInput } from '@/components/workspace/AddPlaceInput';
 import { BudgetPanel } from '@/components/workspace/BudgetPanel';
 import { CafesPanel } from '@/components/workspace/CafesPanel';
@@ -52,7 +61,6 @@ export function SecondarySidebar() {
   const activeProjectId = useTripStore((s) => s.activeProjectId);
   const activeFolderId = useTripStore((s) => s.activeFolderId);
   const mobile = useTripStore((s) => s.viewport === 'mobile');
-  const mobilePanel = useTripStore((s) => s.mobilePanel);
   const target: DrawerPanel | null = activeProjectId
     ? { kind: 'trip', id: activeProjectId }
     : activeFolderId
@@ -73,24 +81,9 @@ export function SecondarySidebar() {
 
   if (mobile) {
     return (
-      <>
-        <AnimatePresence initial={false} onExitComplete={() => setShown(null)}>
-          {open && mobilePanel === 'workspace' && (
-            <motion.aside
-              key="workspace-sheet"
-              initial={{ y: '100%' }}
-              animate={{ y: 0 }}
-              exit={{ y: '100%' }}
-              transition={drawerSpring}
-              className="absolute inset-0 z-20 overflow-hidden bg-zinc-900"
-              aria-label={shown?.kind === 'folder' ? 'Project overview' : 'Trip workspace'}
-            >
-              {panel(true)}
-            </motion.aside>
-          )}
-        </AnimatePresence>
-        {open && <MobilePanelToggle panelLabel={target?.kind === 'folder' ? 'Overview' : 'Itinerary'} />}
-      </>
+      <MobileSheet open={open} kind={(target ?? shown)?.kind ?? 'trip'} onClosed={() => setShown(null)}>
+        {panel(true)}
+      </MobileSheet>
     );
   }
 
@@ -113,20 +106,126 @@ export function SecondarySidebar() {
   );
 }
 
-function MobilePanelToggle({ panelLabel }: { panelLabel: string }) {
-  const mobilePanel = useTripStore((s) => s.mobilePanel);
+/* -------------------------------------------------------------------------- */
+/*  Phone bottom sheet                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** Pull the sheet down this far (or flick it) to drop back to the map. */
+const SHEET_DISMISS_OFFSET = 110;
+const SHEET_DISMISS_VELOCITY = 650;
+
+/**
+ * Phones: the trip lives in a bottom sheet over the map. Collapsed, it's a pill above the
+ * home indicator; expanded, a 78dvh sheet with a grab handle (drag down to close) and a
+ * Map button. Tapping a place card collapses it and flies to the pin (see selectPin).
+ */
+function MobileSheet({
+  open,
+  kind,
+  onClosed,
+  children,
+}: {
+  open: boolean;
+  kind: DrawerPanel['kind'];
+  onClosed: () => void;
+  children: React.ReactNode;
+}) {
+  const expanded = useTripStore((s) => s.mobilePanel === 'workspace');
   const setMobilePanel = useTripStore((s) => s.setMobilePanel);
-  const showingMap = mobilePanel === 'map';
+  const stops = useTripStore((s) =>
+    s.activeProjectId ? (s.pinsByProject[s.activeProjectId] ?? []).filter((p) => p.day_date !== null).length : 0,
+  );
+  const tripCount = useTripStore((s) => {
+    const folder = selectActiveFolder(s);
+    return folder ? folderTrips(folder, s.projects).length : 0;
+  });
+  const dragControls = useDragControls();
+  const collapse = () => setMobilePanel('map');
+  const expand = () => setMobilePanel('workspace');
+  const label = kind === 'folder' ? 'Project overview' : 'Trip itinerary';
 
   return (
-    <button
-      type="button"
-      onClick={() => setMobilePanel(showingMap ? 'workspace' : 'map')}
-      className="fixed bottom-5 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-900 shadow-[0_10px_30px_-8px_rgba(0,0,0,0.7)] transition-transform active:scale-95"
-    >
-      {showingMap ? <ListOrdered className="size-4" /> : <MapIcon className="size-4" />}
-      {showingMap ? panelLabel : 'Map'}
-    </button>
+    <>
+      <AnimatePresence>
+        {open && expanded && (
+          <motion.div
+            key="sheet-scrim"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            onClick={collapse}
+            className="absolute inset-0 z-20 bg-black/35 md:hidden"
+            aria-hidden
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence initial={false} onExitComplete={() => !open && onClosed()}>
+        {open && expanded && (
+          <motion.aside
+            key="sheet"
+            drag="y"
+            dragListener={false}
+            dragControls={dragControls}
+            dragConstraints={{ top: 0, bottom: 0 }}
+            dragElastic={{ top: 0.04, bottom: 0.7 }}
+            onDragEnd={(_, info) => {
+              if (info.offset.y > SHEET_DISMISS_OFFSET || info.velocity.y > SHEET_DISMISS_VELOCITY) collapse();
+            }}
+            initial={{ y: '100%' }}
+            animate={{ y: 0 }}
+            exit={{ y: '100%' }}
+            transition={drawerSpring}
+            className="absolute inset-x-0 bottom-0 z-20 flex h-[78dvh] flex-col overflow-hidden rounded-t-2xl border-t border-zinc-800 bg-zinc-900/98 shadow-[0_-24px_60px_-20px_rgba(0,0,0,0.85)] backdrop-blur-xl md:hidden"
+            aria-label={label}
+          >
+            <div
+              onPointerDown={(e) => dragControls.start(e)}
+              className="relative flex shrink-0 cursor-grab touch-none items-center justify-end px-3 pt-3 pb-1 active:cursor-grabbing"
+            >
+              <span className="absolute top-2 left-1/2 h-1.5 w-10 -translate-x-1/2 rounded-full bg-zinc-700" aria-hidden />
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={collapse}
+                className="flex items-center gap-1.5 rounded-full border border-zinc-700/60 bg-zinc-800/80 px-3 py-1.5 text-xs font-medium text-zinc-200 active:bg-zinc-700"
+              >
+                <MapIcon className="size-3.5" /> Map
+              </button>
+            </div>
+            <div className="min-h-0 flex-1">{children}</div>
+          </motion.aside>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {open && !expanded && (
+          <motion.div
+            key="sheet-pill"
+            initial={{ opacity: 0, y: 24 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 24 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+            className="pointer-events-none absolute inset-x-0 bottom-[max(1rem,env(safe-area-inset-bottom))] z-20 flex justify-center md:hidden"
+          >
+            <button
+              type="button"
+              onClick={expand}
+              aria-label={`Show ${label.toLowerCase()}`}
+              className="pointer-events-auto flex items-center gap-2 rounded-full bg-zinc-100 py-2.5 pr-3.5 pl-4 text-sm font-medium text-zinc-900 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.75)] transition-transform active:scale-95"
+            >
+              {kind === 'folder' ? <FolderOpen className="size-4" /> : <ListOrdered className="size-4" />}
+              {kind === 'folder' ? 'Overview' : 'Itinerary'}
+              <span className="text-zinc-500 tabular-nums">
+                · {kind === 'folder' ? `${tripCount} trip${tripCount === 1 ? '' : 's'}` : `${stops} stop${stops === 1 ? '' : 's'}`}
+              </span>
+              <ChevronUp className="size-4 text-zinc-500" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
   );
 }
 

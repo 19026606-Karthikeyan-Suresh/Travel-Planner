@@ -19,6 +19,9 @@ body {
 body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  /* The app shell never scrolls; stop iOS rubber-banding the whole page (and the map with it). */
+  overscroll-behavior: none;
 }
 
 ::selection {
@@ -30,10 +33,12 @@ body {
   scrollbar-color: rgb(63 63 70 / 0.7) transparent;
 }
 
-.scrollbar-none {
+.scrollbar-none,
+.no-scrollbar {
   scrollbar-width: none;
 }
-.scrollbar-none::-webkit-scrollbar {
+.scrollbar-none::-webkit-scrollbar,
+.no-scrollbar::-webkit-scrollbar {
   display: none;
 }
 
@@ -72,6 +77,32 @@ input[type='date']::-webkit-calendar-picker-indicator {
 
 .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
   filter: invert(1) opacity(0.75);
+}
+
+/* iOS Safari zooms the page when a field under 16px gets focus, then leaves it zoomed and
+   clipped. Larger text on phones avoids that without disabling pinch-zoom. */
+@media (max-width: 767px) {
+  input:not([type='checkbox']):not([type='radio']),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Phones: zoom buttons sit fully inside the screen, above the itinerary pill and the iOS
+   home indicator / Safari toolbar (MapLibre's default corner margins clip them). */
+@media (max-width: 767px) {
+  .maplibregl-ctrl-bottom-right {
+    right: max(0.75rem, env(safe-area-inset-right));
+    bottom: calc(6rem + env(safe-area-inset-bottom));
+  }
+  .maplibregl-ctrl-bottom-right .maplibregl-ctrl {
+    margin: 0 0 0.5rem 0;
+  }
+  .maplibregl-ctrl-group button {
+    width: 40px !important;
+    height: 40px !important;
+  }
 }
 
 .maplibregl-ctrl-attrib {

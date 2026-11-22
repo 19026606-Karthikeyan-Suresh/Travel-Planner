@@ -1,41 +1,25 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import type { UserProfile } from '@/types/trip';
-import { Lobby } from '@/components/join/Lobby';
 import { JoinShell, Spinner } from '@/components/join/JoinUi';
-import { getDemoGuest, isSupabaseConfigured, onAuthChange } from '@/lib/supabaseClient';
 
-/** `/lobby/<tripId>`: where a room code (or invite link) lands after joining. */
-export default function LobbyPage() {
+/**
+ * The lobby is gone: joining now lands straight on the trip. Kept only so `/lobby/<tripId>`
+ * links people already have (bookmarks, chats) still open the right itinerary.
+ */
+export default function LobbyRedirect() {
   const params = useParams<{ projectId: string }>();
-  const projectId = decodeURIComponent(params.projectId ?? '');
   const router = useRouter();
-  /** `undefined` until the session has been restored. */
-  const [user, setUser] = useState<UserProfile | null | undefined>(undefined);
+  const projectId = decodeURIComponent(params.projectId ?? '');
 
   useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setUser(getDemoGuest());
-      return;
-    }
-    return onAuthChange(setUser);
-  }, []);
+    router.replace(projectId ? `/?trip=${encodeURIComponent(projectId)}` : '/');
+  }, [projectId, router]);
 
-  // A lobby needs a member: signed-out visitors go and enter a code first.
-  const signedOut = isSupabaseConfigured && user === null;
-  useEffect(() => {
-    if (signedOut) router.replace('/join');
-  }, [signedOut, router]);
-
-  if (user === undefined || signedOut) {
-    return (
-      <JoinShell>
-        <Spinner label="Opening the lobby…" />
-      </JoinShell>
-    );
-  }
-
-  return <Lobby projectId={projectId} user={user} />;
+  return (
+    <JoinShell>
+      <Spinner label="Opening your trip…" />
+    </JoinShell>
+  );
 }

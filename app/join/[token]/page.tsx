@@ -5,7 +5,6 @@ import { useParams, useRouter } from 'next/navigation';
 import { ArrowRight, KeyRound, Link2Off, RotateCcw, TriangleAlert } from 'lucide-react';
 import type { ShareLinkPreview, UserProfile } from '@/types/trip';
 import { AuthScreen } from '@/components/AuthScreen';
-import { GuestJoinCard } from '@/components/join/GuestJoinCard';
 import { JoinShell, PrimaryButton, SecondaryButton, Spinner, StatusCard } from '@/components/join/JoinUi';
 import {
   acceptShareLink,
@@ -19,11 +18,12 @@ import { errorMessage } from '@/store/useTripStore';
 import { formatDateRangeLong } from '@/lib/utils';
 
 /**
- * Landing page for invites: `/join/K7QM-2XPA` (room code, typed or scanned from the QR) or
- * `/join/<token>` (links made before room codes existed).
+ * Invite landing page: `/join/K7QM-2XPA` (room code) or `/join/<token>` (older links).
  *
- * Signed in → join and open the lobby. Signed out → a display name is enough (guest), or
- * they can sign in with an account; either way they land in the lobby.
+ * Signed in → join and go straight to the trip's itinerary.
+ * Signed out → the sign-in / sign-up form with the invite summary on top; the moment a
+ * session exists (password sign-in, instant sign-up, or the email-confirmation round-trip
+ * through /auth/callback back to this page) the same join runs.
  */
 export default function JoinTripPage() {
   const params = useParams<{ token: string }>();
@@ -31,31 +31,25 @@ export default function JoinTripPage() {
   const roomCode = isRoomCode(slug) ? formatRoomCode(slug) : null;
   const router = useRouter();
 
-  /** Share-link token behind the code (or the slug itself for old links); null = no such room. */
-  const [token, setToken] = useState<string | null>(null);
+  /** Share-link token behind the code (or the slug itself); `undefined` while resolving, null if none. */
+  const [token, setToken] = useState<string | null | undefined>(undefined);
   const [preview, setPreview] = useState<ShareLinkPreview | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
-  /** `undefined` until the session has been restored. */
+  /** `undefined` until the session has been restored. Demo mode has no accounts: always "in". */
   const [user, setUser] = useState<UserProfile | null | undefined>(undefined);
-  const [useAccount, setUseAccount] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const accepting = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-    setPreview(null);
-    setLookupError(null);
     void (async () => {
       try {
         const resolved = roomCode ? await resolveRoomCode(roomCode) : slug || null;
-        const result: ShareLinkPreview = resolved ? await getShareLinkPreview(resolved) : { valid: false };
-        if (cancelled) return;
-        setToken(resolved);
-        setPreview(result);
+        if (!cancelled) setToken(resolved);
       } catch (error) {
         if (cancelled) return;
         setLookupError(errorMessage(error));
-        setPreview({ valid: false });
+        setToken(null);
       }
     })();
     return () => {
@@ -63,35 +57,47 @@ export default function JoinTripPage() {
     };
   }, [slug, roomCode]);
 
-  // Follows sign-in on this page too, so finishing the guest or account form joins automatically.
-  // Demo mode has no sessions: everyone gets the display-name step.
   useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setUser(null);
-      return;
-    }
+    if (!isSupabaseConfigured) return;
     return onAuthChange(setUser);
   }, []);
 
+  const signedIn = !isSupabaseConfigured || Boolean(user);
+  const sessionKnown = !isSupabaseConfigured || user !== undefined;
+
+  // Only signed-out visitors need the preview (for the invite banner); members skip straight to joining.
+  useEffect(() => {
+    if (!token || !sessionKnown || signedIn) return;
+    let cancelled = false;
+    getShareLinkPreview(token)
+      .then((result) => !cancelled && setPreview(result))
+      .catch(() => !cancelled && setPreview({ valid: false }));
+    return () => {
+      cancelled = true;
+    };
+  }, [token, sessionKnown, signedIn]);
+
   const phase =
-    preview === null || user === undefined
+    token === undefined || !sessionKnown
       ? 'loading'
-      : !preview.valid
+      : token === null
         ? 'invalid'
         : joinError
           ? 'error'
-          : user
+          : signedIn
             ? 'joining'
-            : useAccount
-              ? 'account'
-              : 'guest';
+            : preview === null
+              ? 'loading'
+              : !preview.valid
+                ? 'invalid'
+                : 'auth';
 
   const join = useCallback(async () => {
     if (accepting.current || !token) return;
     accepting.current = true;
     try {
       const result = await acceptShareLink(token);
-      router.replace(`/lobby/${encodeURIComponent(result.project_id)}`);
+      router.replace(`/?trip=${encodeURIComponent(result.project_id)}`);
     } catch (error) {
       accepting.current = false;
       setJoinError(errorMessage(error));
@@ -102,26 +108,15 @@ export default function JoinTripPage() {
     if (phase === 'joining') void join();
   }, [phase, join]);
 
-  if (phase === 'account' && preview) {
-    return <AuthScreen invitePreview={preview} onJoinAsGuest={() => setUseAccount(false)} />;
+  if (phase === 'auth' && preview) {
+    return <AuthScreen invitePreview={preview} redirectNext={`/join/${encodeURIComponent(slug)}`} />;
   }
 
   return (
     <JoinShell>
       {phase === 'loading' && <Spinner label={roomCode ? `Checking room ${roomCode}…` : 'Checking your invite…'} />}
 
-      {phase === 'guest' && preview && (
-        <GuestJoinCard
-          preview={preview}
-          roomCode={roomCode}
-          onSignedIn={setUser}
-          onUseAccount={isSupabaseConfigured ? () => setUseAccount(true) : undefined}
-        />
-      )}
-
-      {phase === 'joining' && (
-        <Spinner label={`Joining ${preview?.title ?? 'the trip'}…`} detail={tripLine(preview)} />
-      )}
+      {phase === 'joining' && <Spinner label="Joining trip…" detail={tripLine(preview)} />}
 
       {phase === 'invalid' && (
         <StatusCard
@@ -162,7 +157,7 @@ export default function JoinTripPage() {
         <StatusCard
           tone="error"
           icon={<TriangleAlert className="size-5" />}
-          title={`Couldn’t join ${preview?.title ?? 'the trip'}`}
+          title="Couldn’t join the trip"
           body={joinError ?? 'Something went wrong.'}
         >
           <div className="flex gap-2">
@@ -182,5 +177,5 @@ export default function JoinTripPage() {
 function tripLine(preview: ShareLinkPreview | null): string | undefined {
   if (!preview?.valid) return undefined;
   const dates = preview.start_date && preview.end_date ? formatDateRangeLong(preview.start_date, preview.end_date) : null;
-  return [preview.destination_name, dates].filter(Boolean).join(' · ') || undefined;
+  return [preview.title, preview.destination_name, dates].filter(Boolean).join(' · ') || undefined;
 }

@@ -97,7 +97,7 @@ export function PrimarySidebar() {
               <motion.aside
                 variants={{ hidden: { x: '-100%' }, shown: { x: 0 } }}
                 transition={sidebarSpring}
-                className="absolute inset-y-0 left-0 w-[280px] max-w-[85vw] border-r border-zinc-800/80 bg-zinc-950 shadow-2xl shadow-black/60"
+                className="absolute inset-y-0 left-0 w-[300px] max-w-[85vw] border-r border-zinc-800/80 bg-zinc-950 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] shadow-2xl shadow-black/60"
                 aria-label="Trips sidebar"
               >
                 {content}
@@ -114,8 +114,10 @@ export function PrimarySidebar() {
 /** Reopens the primary sidebar; rendered wherever the collapsed sidebar used to be. */
 export function SidebarToggle({ className }: { className?: string }) {
   const open = useTripStore(selectPrimaryOpen);
+  const mobile = useTripStore((s) => s.viewport === 'mobile');
   const setPrimaryOpen = useTripStore((s) => s.setPrimaryOpen);
-  if (open) return null;
+  // Phones open the sidebar from the menu button in MobileTopBar.
+  if (open || mobile) return null;
   return (
     <button
       type="button"

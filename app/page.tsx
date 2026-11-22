@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import { motion } from 'framer-motion';
 import { Compass } from 'lucide-react';
 import { AuthScreen } from '@/components/AuthScreen';
+import { MobileTopBar } from '@/components/mobile/MobileTopBar';
 import { PrimarySidebar } from '@/components/PrimarySidebar';
 import { SecondarySidebar } from '@/components/SecondarySidebar';
 import { Toaster } from '@/components/Toaster';
@@ -83,6 +84,7 @@ export default function Home() {
           <section className="relative z-10 h-full min-w-0 flex-1" aria-label="Map">
             <MapCanvas />
           </section>
+          <MobileTopBar />
         </motion.main>
       )}
 

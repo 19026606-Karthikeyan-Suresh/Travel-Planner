@@ -2,10 +2,10 @@
 
 import { useId, useRef, useState, type KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { LoaderCircle, MapPinPlus, Plus, Search } from 'lucide-react';
+import { CircleAlert, Link2, LoaderCircle, MapPinPlus, Plus, Search } from 'lucide-react';
 import { UNASSIGNED, type BucketKey } from '@/types/trip';
-import type { PlaceResult } from '@/lib/geocode';
-import { usePlaceSearch } from '@/hooks/usePlaceSearch';
+import type { PlaceSearchResult } from '@/lib/places/shared';
+import { useMapsLinkResolve, usePlacesApiSearch } from '@/hooks/usePlaceSearch';
 import { useTripStore } from '@/store/useTripStore';
 import { CategoryIcon } from '@/components/ui/CategoryIcon';
 import { cn } from '@/lib/utils';
@@ -17,9 +17,17 @@ interface Props {
   accent?: string;
 }
 
-type Option = { kind: 'place'; place: PlaceResult } | { kind: 'custom'; name: string };
+type Option =
+  | { kind: 'place'; place: PlaceSearchResult }
+  | { kind: 'link'; place: PlaceSearchResult }
+  | { kind: 'custom'; name: string };
 
-/** Inline "+ Add a place" search that adds straight into a day or Saved Places. */
+const optionKey = (option: Option) => (option.kind === 'custom' ? 'custom' : `${option.kind}:${option.place.id}`);
+
+/**
+ * Inline "+ Add a place": searches through /api/places/search (Google Places when the server
+ * has a key, OpenStreetMap otherwise) and also accepts a pasted Google Maps share link.
+ */
 export function AddPlaceInput({ bucket, fallbackCenter, accent = '#6366f1' }: Props) {
   const addPin = useTripStore((s) => s.addPin);
   const notify = useTripStore((s) => s.notify);
@@ -31,31 +39,37 @@ export function AddPlaceInput({ bucket, fallbackCenter, accent = '#6366f1' }: Pr
   const listId = useId();
   const center = mapCenter ?? fallbackCenter;
 
-  const { results, status } = usePlaceSearch(query, { near: center, enabled: open });
+  const link = useMapsLinkResolve(query, open);
+  const search = usePlacesApiSearch(query, { near: center, enabled: open && !link.isLink });
   const trimmed = query.trim();
-  const options: Option[] = [
-    ...results.map((place): Option => ({ kind: 'place', place })),
-    ...(trimmed.length >= 2 ? [{ kind: 'custom', name: trimmed } satisfies Option] : []),
-  ];
+  const options: Option[] = link.isLink
+    ? link.place
+      ? [{ kind: 'link', place: link.place }]
+      : []
+    : [
+        ...search.results.map((place): Option => ({ kind: 'place', place })),
+        ...(trimmed.length >= 2 ? [{ kind: 'custom', name: trimmed } satisfies Option] : []),
+      ];
+  const loading = link.isLink ? link.status === 'loading' : search.status === 'loading';
 
   const dayDate = bucket === UNASSIGNED ? null : bucket;
 
   const pick = (option: Option) => {
-    if (option.kind === 'place') {
+    if (option.kind === 'custom') {
+      // Offline / no match: drop it near the current view; the marker is draggable.
+      const jitter = () => (Math.random() - 0.5) * 0.004;
+      void addPin({ name: option.name, lat: center.lat + jitter(), lng: center.lng + jitter(), day_date: dayDate });
+      notify('Drag the new marker on the map to set its exact spot.');
+    } else {
       const { place } = option;
       void addPin({
         name: place.name,
         address: place.address || null,
         lat: place.lat,
         lng: place.lng,
-        category: place.category,
+        category: place.category_code,
         day_date: dayDate,
       });
-    } else {
-      // Offline / no match: drop it near the current view; the marker is draggable.
-      const jitter = () => (Math.random() - 0.5) * 0.004;
-      void addPin({ name: option.name, lat: center.lat + jitter(), lng: center.lng + jitter(), day_date: dayDate });
-      notify('Drag the new marker on the map to set its exact spot.');
     }
     setQuery('');
     setHighlight(0);
@@ -98,8 +112,10 @@ export function AddPlaceInput({ bucket, fallbackCenter, accent = '#6366f1' }: Pr
   return (
     <div className="relative">
       <div className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-950/70 px-3 py-2 ring-2 ring-indigo-500/15 transition-colors focus-within:border-indigo-500/60">
-        {status === 'loading' ? (
+        {loading ? (
           <LoaderCircle className="size-4 shrink-0 animate-spin text-zinc-500" />
+        ) : link.isLink ? (
+          <Link2 className="size-4 shrink-0 text-indigo-300" />
         ) : (
           <Search className="size-4 shrink-0 text-zinc-500" />
         )}
@@ -118,12 +134,13 @@ export function AddPlaceInput({ bucket, fallbackCenter, accent = '#6366f1' }: Pr
               setQuery('');
             }, 120)
           }
-          placeholder="Search restaurants, sights, hotels…"
+          placeholder="Search a place or paste a Google Maps link…"
           role="combobox"
           aria-expanded={options.length > 0}
           aria-controls={listId}
           aria-autocomplete="list"
-          className="w-full bg-transparent text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
+          // 16px on phones so iOS Safari doesn't zoom the page when the field is focused.
+          className="w-full bg-transparent text-base text-zinc-100 placeholder:text-zinc-500 focus:outline-none sm:text-sm"
         />
         <kbd className="hidden rounded border border-zinc-700 px-1 font-mono text-[10px] text-zinc-500 sm:block">esc</kbd>
       </div>
@@ -140,7 +157,7 @@ export function AddPlaceInput({ bucket, fallbackCenter, accent = '#6366f1' }: Pr
             className="mt-1.5 overflow-hidden rounded-xl border border-zinc-700/70 bg-zinc-900 p-1 shadow-2xl shadow-black/40"
           >
             {options.map((option, i) => (
-              <li key={option.kind === 'place' ? option.place.id : 'custom'} role="option" aria-selected={i === highlight}>
+              <li key={optionKey(option)} role="option" aria-selected={i === highlight}>
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
@@ -149,21 +166,10 @@ export function AddPlaceInput({ bucket, fallbackCenter, accent = '#6366f1' }: Pr
                   className={cn(
                     'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors',
                     i === highlight ? 'bg-zinc-800' : 'hover:bg-zinc-800/60',
+                    option.kind === 'link' && 'border border-indigo-500/30 bg-indigo-500/[0.07]',
                   )}
                 >
-                  {option.kind === 'place' ? (
-                    <>
-                      <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-zinc-800">
-                        <CategoryIcon category={option.place.category} />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm text-zinc-100">{option.place.name}</span>
-                        <span className="block truncate text-[11px] text-zinc-500 capitalize">
-                          {[option.place.kind, option.place.address].filter(Boolean).join(' · ')}
-                        </span>
-                      </span>
-                    </>
-                  ) : (
+                  {option.kind === 'custom' ? (
                     <>
                       <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-indigo-500/10">
                         <MapPinPlus className="size-3.5 text-indigo-300" />
@@ -172,14 +178,66 @@ export function AddPlaceInput({ bucket, fallbackCenter, accent = '#6366f1' }: Pr
                         Add “<span className="text-zinc-100">{option.name}</span>” as a custom place
                       </span>
                     </>
+                  ) : (
+                    <>
+                      <span
+                        className={cn(
+                          'grid size-7 shrink-0 place-items-center rounded-lg',
+                          option.kind === 'link' ? 'bg-indigo-500/15' : 'bg-zinc-800',
+                        )}
+                      >
+                        {option.kind === 'link' ? (
+                          <Link2 className="size-3.5 text-indigo-300" />
+                        ) : (
+                          <CategoryIcon category={option.place.category_code} />
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        {option.kind === 'link' && (
+                          <span className="block text-[10.5px] font-medium tracking-wide text-indigo-300 uppercase">
+                            Add from Google Maps link
+                          </span>
+                        )}
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate text-sm text-zinc-100">{option.place.name}</span>
+                          {option.place.business_status === 'CLOSED_TEMPORARILY' && (
+                            <span className="shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[10px] font-medium text-amber-300">
+                              Temp. Closed
+                            </span>
+                          )}
+                        </span>
+                        <span className="block truncate text-[11px] text-zinc-500 first-letter:uppercase">
+                          {[option.kind === 'place' ? option.place.kind : null, option.place.address].filter(Boolean).join(' · ') ||
+                            `${option.place.lat.toFixed(5)}, ${option.place.lng.toFixed(5)}`}
+                        </span>
+                      </span>
+                    </>
                   )}
                 </button>
               </li>
             ))}
+            {!link.isLink && search.results.length > 0 && (
+              <li className="px-2.5 pt-1 pb-0.5 text-right text-[10px] text-zinc-600" aria-hidden>
+                {search.source === 'google' ? 'Results from Google Maps' : 'Results from OpenStreetMap'}
+              </li>
+            )}
           </motion.ul>
         )}
       </AnimatePresence>
-      {status === 'error' && trimmed.length >= 2 && (
+
+      {link.isLink && link.status === 'loading' && (
+        <p className="mt-1.5 px-1 text-[11px] text-zinc-500">Reading the Google Maps link…</p>
+      )}
+      {link.isLink && link.status === 'error' && (
+        <p className="mt-1.5 flex items-start gap-1.5 px-1 text-[11px] text-rose-300">
+          <CircleAlert className="mt-px size-3.5 shrink-0" />
+          {link.error ?? 'Couldn’t read that link.'}
+        </p>
+      )}
+      {!link.isLink && trimmed.length > 0 && trimmed.length < 3 && (
+        <p className="mt-1.5 px-1 text-[11px] text-zinc-600">Keep typing to search…</p>
+      )}
+      {!link.isLink && search.status === 'error' && trimmed.length >= 3 && (
         <p className="mt-1.5 px-1 text-[11px] text-zinc-500">Search is offline — you can still add it as a custom place.</p>
       )}
     </div>

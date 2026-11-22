@@ -12,6 +12,10 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  // Draw under the notch / home indicator; overlays pad themselves with env(safe-area-inset-*).
+  viewportFit: 'cover',
   themeColor: '#09090b',
 };
 

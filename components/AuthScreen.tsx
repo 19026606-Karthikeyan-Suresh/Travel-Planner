@@ -41,15 +41,16 @@ function friendlyAuthError(message: string): string {
 
 /**
  * Email + password gate shown while there is no Supabase session. Success needs no
- * callback: the store's `onAuthStateChange` listener swaps in the workspace.
+ * callback: whoever rendered this listens to `onAuthStateChange` and moves on (the
+ * workspace, or the /join page, which then joins the trip).
  */
 export function AuthScreen({
   invitePreview,
-  onJoinAsGuest,
+  redirectNext = '/',
 }: {
   invitePreview?: ShareLinkPreview | null;
-  /** On an invite: go back to joining with just a display name. */
-  onJoinAsGuest?: () => void;
+  /** In-app path to resume after an email confirmation (e.g. `/join/K7QM-2XPA`). */
+  redirectNext?: string;
 } = {}) {
   const [mode, setMode] = useState<Mode>('sign_in');
   const [name, setName] = useState('');
@@ -90,7 +91,7 @@ export function AuthScreen({
     setConfirmationSentTo(null);
     try {
       if (signingUp) {
-        const { needsConfirmation } = await signUpWithEmail(trimmedEmail, password, name);
+        const { needsConfirmation } = await signUpWithEmail(trimmedEmail, password, name, redirectNext);
         if (needsConfirmation) {
           setConfirmationSentTo(trimmedEmail);
           setMode('sign_in');
@@ -298,21 +299,14 @@ export function AuthScreen({
           </div>
         </div>
 
-        <div className="mt-4 text-center text-xs text-zinc-500">
-          {onJoinAsGuest ? (
-            <button type="button" onClick={onJoinAsGuest} className="inline-flex items-center gap-1.5 font-medium text-zinc-300 hover:text-white">
-              <User className="size-3.5" />
-              Join as a guest with just a name instead
-            </button>
-          ) : (
-            !invitePreview && (
-              <Link href="/join" className="inline-flex items-center gap-1.5 font-medium text-zinc-300 hover:text-white">
-                <KeyRound className="size-3.5" />
-                Have a room code? Join a trip
-              </Link>
-            )
-          )}
-        </div>
+        {!invitePreview && (
+          <div className="mt-4 text-center text-xs text-zinc-500">
+            <Link href="/join" className="inline-flex items-center gap-1.5 font-medium text-zinc-300 hover:text-white">
+              <KeyRound className="size-3.5" />
+              Have a room code? Join a trip
+            </Link>
+          </div>
+        )}
       </motion.div>
     </div>
   );

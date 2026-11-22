@@ -38,8 +38,9 @@ import { cn } from '@/lib/utils';
 const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 const INITIAL_VIEW = { longitude: 139.65, latitude: 35.67, zoom: 1.6 };
 const FIT_PADDING = { top: 110, bottom: 70, left: 70, right: 80 };
-/** Narrow maps: keep the frame clear of the filter panel and the mobile Map/Itinerary pill. */
-const FIT_PADDING_COMPACT = { top: 120, bottom: 90, left: 36, right: 36 };
+/** Phones: keep the frame clear of the top bar + day strip (and the notch), and the bottom sheet pill. */
+const FIT_PADDING_COMPACT = { top: 150, bottom: 120, left: 36, right: 56 };
+const COMPACT_MAX_WIDTH = 768;
 /** Wait for the drawer's width animation to settle before framing. */
 const FIT_SETTLE_MS = 140;
 const FIT_MAX_WAIT_MS = 900;
@@ -95,6 +96,7 @@ export default function MapCanvas() {
   const canEdit = useTripStore(selectCanEdit);
 
   const { project, pins, days, meta } = useItinerary(activeProjectId);
+  const savedCount = useMemo(() => pins.filter((p) => meta.get(p.id)?.bucket === UNASSIGNED).length, [pins, meta]);
   // Cafés tab: the panel's filtered cafés, drawn under the trip's own pins.
   const showCafes = useTripStore((s) => s.activeTab === 'cafes');
   const allCafeMarkers = useTripStore((s) => s.cafeMarkers);
@@ -181,7 +183,7 @@ export default function MapCanvas() {
       return;
     }
     const bounds = points.reduce((b, point) => b.extend(point), new LngLatBounds(points[0], points[0]));
-    const compact = (containerRef.current?.clientWidth ?? 1024) < 640;
+    const compact = (containerRef.current?.clientWidth ?? 1024) < COMPACT_MAX_WIDTH;
     map.fitBounds(bounds, {
       padding: compact ? FIT_PADDING_COMPACT : FIT_PADDING,
       // An overview frames a whole country/region, so it may zoom in further than the world view.
@@ -323,16 +325,26 @@ export default function MapCanvas() {
         {project && canEdit && draftPin && <DropPinPopup key={`${draftPin.lat},${draftPin.lng}`} draft={draftPin} days={days} filter={dayFilter} />}
       </Map>
 
-      {/* When a workspace drawer is docked, its header carries the toggle instead. */}
-      {((!project && !overview) || mobile) && <SidebarToggle className="absolute top-4 left-4 z-10" />}
+      {/* When a workspace drawer is docked, its header carries the toggle instead; phones use the top bar. */}
+      {!project && !overview && <SidebarToggle className="absolute top-4 left-4 z-10" />}
 
       <AnimatePresence>
-        {project && <DayFilterPanel key="filters" days={days} savedCount={pins.filter((p) => meta.get(p.id)?.bucket === UNASSIGNED).length} />}
-        {overview && <FolderLegend key={`legend:${overview.id}`} folder={overview} trips={overviewTrips} colors={tripColors} />}
+        {project &&
+          (mobile ? (
+            <MobileDayStrip key="strip" days={days} savedCount={savedCount} />
+          ) : (
+            <DayFilterPanel key="filters" days={days} savedCount={savedCount} />
+          ))}
+        {overview &&
+          (mobile ? (
+            <MobileTripStrip key={`trip-strip:${overview.id}`} trips={overviewTrips} colors={tripColors} />
+          ) : (
+            <FolderLegend key={`legend:${overview.id}`} folder={overview} trips={overviewTrips} colors={tripColors} />
+          ))}
       </AnimatePresence>
 
       {((project && pinsStatus === 'loading') || (overview && folderPinsStatus === 'loading')) && (
-        <div className="pointer-events-none absolute top-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-3 py-1.5 text-xs text-zinc-300 backdrop-blur-md">
+        <div className="pointer-events-none absolute top-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-3 py-1.5 text-xs text-zinc-300 backdrop-blur-md max-md:top-[calc(max(0.75rem,env(safe-area-inset-top))+6.25rem)]">
           <LoaderCircle className="size-3.5 animate-spin" /> Loading places…
         </div>
       )}
@@ -357,7 +369,8 @@ export default function MapCanvas() {
           {overview.name} overview · click a pin to open its trip
         </div>
       ) : (
-        <div className="pointer-events-none absolute top-16 left-1/2 z-10 -translate-x-1/2 rounded-xl border whitespace-nowrap sm:top-5 border-zinc-700/60 bg-zinc-900/80 px-4 py-2.5 text-center backdrop-blur-md">
+        // Phones say this in the top bar instead.
+        <div className="pointer-events-none absolute top-5 left-1/2 z-10 -translate-x-1/2 rounded-xl border whitespace-nowrap border-zinc-700/60 bg-zinc-900/80 px-4 py-2.5 text-center backdrop-blur-md max-md:hidden">
           <p className="text-sm font-medium text-zinc-100">Pick a trip to start planning</p>
           <p className="text-xs text-zinc-500">Or create one with New Trip</p>
         </div>
@@ -696,6 +709,114 @@ function FilterChip({
       {color && <span className="size-2 rounded-full" style={{ backgroundColor: color }} />}
       {children}
     </button>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Phone filter strips: one scrollable row under the top bar                  */
+/* -------------------------------------------------------------------------- */
+
+/** Sits just below MobileTopBar (same safe-area maths: its top + 3rem tall + 0.5rem gap). */
+const STRIP_POSITION = 'absolute inset-x-0 top-[calc(max(0.75rem,env(safe-area-inset-top))+3.5rem)] z-20 md:hidden';
+
+function MobileStrip({
+  label,
+  role = 'radiogroup',
+  children,
+}: {
+  label: string;
+  role?: 'radiogroup' | 'toolbar';
+  children: React.ReactNode;
+}) {
+  const requestFit = useTripStore((s) => s.requestFit);
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      transition={{ duration: 0.18 }}
+      className={STRIP_POSITION}
+    >
+      <div className="no-scrollbar flex flex-nowrap items-center gap-1.5 overflow-x-auto px-3 py-0.5" role={role} aria-label={label}>
+        <button
+          type="button"
+          onClick={requestFit}
+          aria-label="Fit map to places"
+          className="grid size-8 shrink-0 place-items-center rounded-full border border-zinc-700/60 bg-zinc-900/85 text-zinc-300 shadow-[0_6px_20px_-8px_rgba(0,0,0,0.7)] backdrop-blur-md active:bg-zinc-800"
+        >
+          <Scan className="size-3.5" />
+        </button>
+        {children}
+      </div>
+    </motion.div>
+  );
+}
+
+function StripChip({
+  active,
+  color,
+  onClick,
+  role = 'radio',
+  children,
+}: {
+  active: boolean;
+  color?: string;
+  onClick: () => void;
+  role?: 'radio' | 'button';
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role={role}
+      aria-checked={role === 'radio' ? active : undefined}
+      onClick={onClick}
+      className={cn(
+        'flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium whitespace-nowrap shadow-[0_6px_20px_-8px_rgba(0,0,0,0.7)] backdrop-blur-md transition-colors',
+        active
+          ? 'border-zinc-100 bg-zinc-100 text-zinc-900'
+          : 'border-zinc-700/60 bg-zinc-900/85 text-zinc-200 active:bg-zinc-800',
+      )}
+    >
+      {color && <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />}
+      {children}
+    </button>
+  );
+}
+
+function MobileDayStrip({ days, savedCount }: { days: TripDay[]; savedCount: number }) {
+  const dayFilter = useTripStore((s) => s.dayFilter);
+  const setDayFilter = useTripStore((s) => s.setDayFilter);
+
+  return (
+    <MobileStrip label="Filter map by day">
+      <StripChip active={dayFilter === 'all'} onClick={() => setDayFilter('all')}>
+        All days
+      </StripChip>
+      {days.map((day) => (
+        <StripChip key={day.date} active={dayFilter === day.date} color={day.color} onClick={() => setDayFilter(day.date)}>
+          Day {day.index}
+        </StripChip>
+      ))}
+      {savedCount > 0 && (
+        <StripChip active={dayFilter === UNASSIGNED} color={UNASSIGNED_COLOR} onClick={() => setDayFilter(UNASSIGNED)}>
+          Saved
+        </StripChip>
+      )}
+    </MobileStrip>
+  );
+}
+
+function MobileTripStrip({ trips, colors }: { trips: Project[]; colors: Map<string, string> }) {
+  const setActiveProject = useTripStore((s) => s.setActiveProject);
+  return (
+    <MobileStrip label="Trips in this project" role="toolbar">
+      {trips.map((trip) => (
+        <StripChip key={trip.id} role="button" active={false} color={colors.get(trip.id)} onClick={() => setActiveProject(trip.id)}>
+          {trip.title}
+        </StripChip>
+      ))}
+    </MobileStrip>
   );
 }
 
