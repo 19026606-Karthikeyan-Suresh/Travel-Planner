@@ -3,6 +3,7 @@ import path from 'node:path';
 import { CAFE_TYPES, isInSingapore, type Cafe, type CafeSource, type CafeType } from '@/lib/cafes/types';
 import { areaForPostalCode, slugify } from '@/lib/cafes/classify';
 import { typesFromName } from '@/lib/cafes/cdc';
+import { buildingAt, parseBuilding, withBuildingAddress, type Building } from '@/lib/cafes/buildings';
 
 /*
  * Server-only reader for OpenStreetMap cafés in Singapore, via the Overpass API: every
@@ -10,6 +11,11 @@ import { typesFromName } from '@/lib/cafes/cdc';
  * the mappers added (address, opening hours, website, brand, cuisine). The data is © OpenStreetMap
  * contributors under the ODbL, so the panel credits it. Overpass is a shared public server: the
  * API route's 24-hour cache keeps this to about one query a day.
+ *
+ * Half the cafés are mapped as a bare point with no address, often inside a mall or block whose
+ * outline does have one. A second, lighter query fetches the addressed buildings within 15 m of
+ * those points, with their outlines, and a café missing its address borrows its building's.
+ * It's separate so a slow or failed building query never costs the café list itself.
  */
 
 export const OVERPASS_ENDPOINTS = [
@@ -19,7 +25,7 @@ export const OVERPASS_ENDPOINTS = [
 
 export const OSM_COPYRIGHT = 'https://www.openstreetmap.org/copyright';
 
-const QUERY = `[out:json][timeout:90];
+const CAFES_QUERY = `[out:json][timeout:90];
 area["ISO3166-1"="SG"][admin_level=2]->.sg;
 (
   nwr["amenity"="cafe"](area.sg);
@@ -28,6 +34,18 @@ area["ISO3166-1"="SG"][admin_level=2]->.sg;
   nwr["shop"="coffee"](area.sg);
 );
 out center tags;`;
+
+/** Only cafés mapped as points without a postcode, and one statement: "around" is the costly part. */
+const BUILDINGS_QUERY = `[out:json][timeout:180];
+area["ISO3166-1"="SG"][admin_level=2]->.sg;
+(
+  node["amenity"="cafe"][!"addr:postcode"](area.sg);
+  node["amenity"="ice_cream"][!"addr:postcode"](area.sg);
+  node["shop"="bakery"][!"addr:postcode"](area.sg);
+  node["shop"="coffee"][!"addr:postcode"](area.sg);
+)->.cafes;
+way(around.cafes:15)["building"][~"^addr:(postcode|street)$"~"."];
+out tags geom;`;
 
 /** An OpenStreetMap café, with the brand kept aside for spotting chains. */
 export interface OsmCafe {
@@ -109,14 +127,27 @@ function websiteOf(tags: Tags): string | null {
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
 }
 
-/** Exported for testing against a saved Overpass response. */
-export function parseOverpass(json: unknown): OsmCafe[] {
+function elementsOf(json: unknown): unknown[] {
   const elements = (json as { elements?: unknown } | null)?.elements;
   if (!Array.isArray(elements)) throw new Error('Overpass response has no "elements" list');
+  return elements as unknown[];
+}
+
+/** Building outlines come with geometry; cafés (with `out center`) don't. */
+const outlined = (element: unknown): element is Record<string, unknown> =>
+  Boolean(element && typeof element === 'object' && ('geometry' in element || 'members' in element));
+
+/** Exported for testing against saved Overpass responses: the cafés, and optionally their buildings. */
+export function parseOverpass(json: unknown, buildingsJson?: unknown): OsmCafe[] {
+  const elements = elementsOf(json);
+  const buildings = [...elements, ...(buildingsJson ? elementsOf(buildingsJson) : [])]
+    .filter(outlined)
+    .map(parseBuilding)
+    .filter((b): b is Building => b !== null);
 
   const cafes: OsmCafe[] = [];
-  for (const element of elements as unknown[]) {
-    if (!element || typeof element !== 'object') continue;
+  for (const element of elements) {
+    if (!element || typeof element !== 'object' || outlined(element)) continue;
     const { type, id, lat, lon, center, tags } = element as {
       type?: unknown;
       id?: unknown;
@@ -132,7 +163,13 @@ export function parseOverpass(json: unknown): OsmCafe[] {
     if (!name || !isInSingapore(point.lat, point.lng) || isBubbleTea(tags, name)) continue;
     if (tags['disused:amenity'] || tags['disused:shop'] || tags.vending) continue;
 
-    const { address, postalCode } = osmAddress(tags);
+    // No postcode of its own: fill the gaps from the building it's in.
+    let addressTags = tags;
+    if (!tags['addr:full'] && !/^\d{6}$/.test(tags['addr:postcode'] ?? '')) {
+      const building = buildingAt(point, buildings);
+      if (building) addressTags = withBuildingAddress(tags, building);
+    }
+    const { address, postalCode } = osmAddress(addressTags);
     const brand = tags.brand?.trim() || null;
     cafes.push({
       cafe: {
@@ -175,7 +212,9 @@ const PATIENT = [
   { endpoint: OVERPASS_ENDPOINTS[1], waitMs: 0 },
 ];
 /** With an earlier result to fall back on, one try: nobody should wait minutes for the page. */
-const QUICK = [{ endpoint: OVERPASS_ENDPOINTS[0], waitMs: 0, timeoutMs: 45_000 }];
+const QUICK = [{ endpoint: OVERPASS_ENDPOINTS[0], waitMs: 0, timeoutMs: 60_000 }];
+/** The building query is slower; it only fills in addresses, so it gets one patient try. */
+const BUILDINGS_ATTEMPTS = [{ endpoint: OVERPASS_ENDPOINTS[0], waitMs: 0, timeoutMs: 180_000 }];
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -216,7 +255,15 @@ async function loadSnapshot(): Promise<{ cafes: OsmCafe[]; savedAt: string } | n
 export async function fetchOsmCafes(): Promise<{ cafes: OsmCafe[]; fresh: boolean }> {
   lastGood ??= await loadSnapshot();
   try {
-    const cafes = await queryOverpass(lastGood ? QUICK : PATIENT);
+    const cafesJson = await queryOverpass(CAFES_QUERY, lastGood ? QUICK : PATIENT);
+    let buildingsJson: unknown = null;
+    try {
+      buildingsJson = await queryOverpass(BUILDINGS_QUERY, BUILDINGS_ATTEMPTS);
+    } catch (error) {
+      console.warn(`[cafes] building addresses: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let cafes = parseOverpass(cafesJson, buildingsJson);
+    if (!buildingsJson && lastGood) cafes = withEarlierAddresses(cafes, lastGood.cafes);
     lastGood = { cafes, savedAt: new Date().toISOString() };
     void saveSnapshot(lastGood);
     return { cafes, fresh: true };
@@ -230,11 +277,25 @@ export async function fetchOsmCafes(): Promise<{ cafes: OsmCafe[]; fresh: boolea
   }
 }
 
-async function queryOverpass(attempts: { endpoint: string; waitMs: number; timeoutMs?: number }[]): Promise<OsmCafe[]> {
+/** Without this run's building query, addresses filled from buildings last time still apply. */
+function withEarlierAddresses(cafes: OsmCafe[], earlier: OsmCafe[]): OsmCafe[] {
+  const before = new Map(earlier.map(({ cafe }) => [cafe.id, cafe]));
+  return cafes.map((entry) => {
+    const old = before.get(entry.cafe.id);
+    const better = old && ((!entry.cafe.postalCode && old.postalCode) || (!entry.cafe.address && old.address));
+    if (!better) return entry;
+    return {
+      ...entry,
+      cafe: { ...entry.cafe, address: old.address, postalCode: old.postalCode, area: old.area ?? entry.cafe.area },
+    };
+  });
+}
+
+async function queryOverpass(query: string, attempts: { endpoint: string; waitMs: number; timeoutMs?: number }[]): Promise<unknown> {
   const failures: string[] = [];
   /** Servers that refused outright: asking again won't help. */
   const refused = new Set<string>();
-  for (const { endpoint, waitMs, timeoutMs = 60_000 } of attempts) {
+  for (const { endpoint, waitMs, timeoutMs = 120_000 } of attempts) {
     if (refused.has(endpoint)) continue;
     if (waitMs > 0) await wait(waitMs);
     try {
@@ -245,7 +306,7 @@ async function queryOverpass(attempts: { endpoint: string; waitMs: number; timeo
           Accept: 'application/json',
           'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: new URLSearchParams({ data: QUERY }),
+        body: new URLSearchParams({ data: query }),
         cache: 'no-store',
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -254,7 +315,7 @@ async function queryOverpass(attempts: { endpoint: string; waitMs: number; timeo
         if (!RETRYABLE.has(response.status)) refused.add(endpoint);
         continue;
       }
-      return parseOverpass(await response.json());
+      return (await response.json()) as unknown;
     } catch (error) {
       failures.push(`${new URL(endpoint).host}: ${error instanceof Error ? error.message : String(error)}`);
     }
